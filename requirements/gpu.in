@@ -1,0 +1,11 @@
+# Linux x86_64 / CPython 3.12 / A100 (SM80).
+# Resolve torch from its official cu130 index; see docs/ENVIRONMENT.md.
+-r core.in
+torch==2.14.0+cu130
+flashinfer-python[cu13]==0.7.0
+# Local CUDA compiler/headers, matching torch's CUDA 13.0 runtime.
+# Avoid depending on the machine-wide CUDA 13.3 installation.
+cuda-toolkit[nvcc,cccl,cudart]==13.0.3
+# Keep Python bindings and the JIT linker on the same CUDA minor line.
+cuda-python==13.0.3
+nvidia-nvjitlink==13.0.88

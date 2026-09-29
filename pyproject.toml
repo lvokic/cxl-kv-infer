@@ -12,9 +12,16 @@ dependencies = ["numpy>=1.26,<3"]
 [project.optional-dependencies]
 gpu = ["torch", "flashinfer-python"]
 ann = ["faiss-cpu"]
+inference = ["torch", "transformers==4.57.6"]
 
 [project.scripts]
-cxl-kv-replay = "cxl_kv_replay.cli:main"
+cxl-kv-replay = "cli:main"
+cxl-kv-infer = "module.cli:main"
+
+[tool.setuptools]
+py-modules = ["cli", "kv_trace", "reference"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["backends*", "module*"]
+namespaces = true

@@ -1,0 +1,4 @@
+# Preserve the already validated CUDA / FlashInfer environment.
+-r gpu.in
+-c gpu-cu130.lock
+transformers==4.57.6

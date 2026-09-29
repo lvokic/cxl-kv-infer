@@ -15,6 +15,10 @@
 
 ```mermaid
 flowchart LR
+    M[模型加载 / prefill / cached decode] --> Q[真实 post-RoPE Q/K/V]
+    Q --> X[逐 head 选择与在线 attention 后端]
+    X --> L[后续层 / logits / token]
+    Q --> A
     A[NPZ GroupTrace] --> B[CSR 与元数据检查]
     B --> C[FP64 selected attention]
     B --> D[独立 head 逻辑行与 unique KV pool]
@@ -23,7 +27,15 @@ flowchart LR
     E --> F
 ```
 
-当前没有 NUMA allocator、CXL backend 或计时循环。NPZ load 和 NumPy advanced indexing 会分配普通 host memory；GPU adapter 还会创建 selected KV 副本与 workspace。它是数值接口起点，不可用于论文性能结论。
+模型入口位于 `src/module/`，复用 Transformers 的模型层和 DynamicCache；
+prefill 保持 full causal SDPA，目标 decode group 可选择 SDPA、FlashInfer 或显式 CPU FP64 参考。
+默认只替换 layer 0 / group 0。若仅替换部分 group，则整层 SDPA 提供其余 heads 的原始输出，
+该重复计算明确计入诊断流程。选集在各 Q head 独立定义；union 仅用于 FlashInfer KV pool 去重。
+真实 trace 可直接回放，运行说明见 [DEVELOPMENT.md](DEVELOPMENT.md)。
+
+当前没有 NUMA allocator 或 CXL backend。模型 KV 驻留指定设备；NPZ load 和 NumPy advanced indexing
+分配普通 host memory，GPU 路径还创建 selected KV 副本与 128 MiB workspace。
+已记录同步单请求诊断时间与 PyTorch allocator 峰值，尚无稳定性能测量框架，不可用于论文性能结论。
 
 ## 3. Trace v1
 
@@ -108,3 +120,32 @@ exact-logit identity 还包含 step、head、score semantics；K identity 不包
 对每 head 只在 C_h 内精排，union 只合并 K 读取。选中 K 的 lease 交给执行端；不选中候选及时释放。V 到最终选集确定后才获取。默认 GPU resident token 留在 hot 路径，除非明确计入跨设备取回的成本。
 
 KLease、staging、packet、partial buffers 必须有独立且有界的预算，完成事件覆盖所有消费者，包括异步 cache install。MVP 采用只读 base + exact delta；backing 和 index 可见性同时就绪后再发布 epoch。
+
+## 7. 模型、KV 生命周期与 attention 接口
+
+`module/interfaces.py` 定义框架无关的 `ModelAdapter`、`ModelStep`、`KVCacheLifecycle`、
+`KVCacheLease`、`TokenSelector`、`AttentionRequest` 和 `AttentionExecutor`。公共 greedy loop
+只消费模型 adapter；控制器把当前 query、逐 head row IDs 和 cache lease 交给 executor。
+
+当前 Transformers adapter 通过 `DynamicCache` 的 append hook 统计真实 cache 更新，并对
+模型持有的 K/V tensor 发只读借用 lease。它不复制、不改变 K/V 的放置；GPU cache 仍是 HBM，
+CPU cache 才记为普通 CPU memory，二者都不是 CXL。每个 lease 在 executor 返回后释放；异步
+executor 通过 `AttentionResult.completion` 传递消费者完成事件，新的 cache adapter 必须在
+释放/复用其 backing 前等待该事件。
+
+Selector 与执行端互相独立：selector 生成每个 Q head 的行号，SDPA、FlashInfer 或 FP64
+reference 按相同逻辑 mask 执行。`quest` 以 MInference Quest chunk upper bound 做逐 head 选块；
+`retr-attn` 以 MInference 的 sink/recent + Flat-IP retrieval 组织选集。两者都由本项目 executor
+对选中 K/V 重算精确 logits，避免用候选搜索分数代替 attention score。FlashInfer 可以对选中
+K/V 做 union 去重，但 CSR membership 继续决定每个 head 的逻辑选集。当前 `retr-attn` 的 CPU
+NumPy Flat-IP 是算法基线，会在每次 selection 记录 K/Q host copy bytes；它不是 papyfaiss
+或上游端到端模块。当前实现是单请求诊断路径，cache lease 计量逻辑 bytes，传输为零；selector
+自己的候选索引/复制另行计数，尚无异步 cache install、CPU/CXL allocator 或真实 CXL 流量计量。
+
+## 8. Native 模块接口
+
+计划中的 C++ 层负责 NUMA allocation、residency query、K/V gather 与 CPU partial，不放置 selector 策略。
+allocation 需要返回 owner/policy 并采样实际页；逻辑 bytes 与硬件流量分开命名。
+PyBind view 必须持有 native allocation，异步消费者完成前不释放。GPU staging 使用有界 ring，注册失败显式报错。
+CPU partial 先实现 FP32 累积的 stable softmax + PV，输入 exact logits 有效时复用。
+这里是 T02/T03 的设计约束，不代表已有 allocator 或 kernel。研究顺序见 [RESEARCH.md](RESEARCH.md)。

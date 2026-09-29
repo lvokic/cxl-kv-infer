@@ -1,6 +1,6 @@
 # 研究依据与输入版本
 
-交付日期：2026-09-29。研究建议和待实现架构不等于已测性能。
+更新：2026-09-29。来源用于核对设计和代码边界，不构成此仓库的性能证据。
 
 ## 本地输入
 
@@ -18,6 +18,25 @@
 
 原始材料保留在知识库，没有修改或复制到新仓库。CXL-Vector 是 owner 提供的匿名 SIGMOD '27 投稿稿；此记录不表示论文已录用。其源码尚未提供，当前复用判断依据稿件中的机制。
 
+## 上游代码检查
+
+本机只读代码检查锁定到下列 checkout：
+
+| 项目 | 本机目录 | HEAD | 检查入口 |
+|---|---|---|---|
+| QUEST | `~/Quest` | `01c1623bf9395009520874e989e29f683203b357` | `quest/models/QuestAttention.py`; `quest/utils/{kv_cache,controller}.py`; `kernels/include/{decode,topk}/` |
+| RetrievalAttention / RetroInfer | `~/RetrievalAttention` | `03f912c6e917c380d9d90c5ec85bb0f161ba53ef` | `model_hub/LLM.py::layer_decode`; `cache_hub/retroinfer_cache*.py`; `attn_hub/retroinfer_attn.py` |
+| MInference | `~/MInference` | `29ef1974fcb5a1440ccf92d7d7996900230fddcf` | `minference/modules/quest.py::quest_decode_kernel`; `minference/modules/retr_attn.py::{RetrAttnCache,retr_attn}` |
+
+QUEST checkout 有未提交 CMake 修改及额外实验文件；检查期间没有修改它。上表只用于标识 HEAD，
+不声称所有本地文件都处于 clean 状态。RetrievalAttention checkout 当时为 clean。
+wiki commit 为 `b6b24fbc00fdc8febcf198a38a3a131036a1761a`，原文链接见相邻知识库；没有修改。
+MInference checkout 在接入检查时工作区 clean；其 MIT license 保留于上游。当前仓库仅实现了
+本地 selector adapter，没有复制上游实现文件或引入其依赖。
+
+源码观察和共用边界见 [RESEARCH.md](RESEARCH.md)。上游依赖版本与本仓库环境不同，详见
+[DEVELOPMENT.md](DEVELOPMENT.md)；没有安装上游依赖或运行上游 benchmark。
+
 ## 研究定位
 
 - [CXL-Vector note](../../kvcache-wiki/wiki/sources/cxl-vector.md)：DRAM graph/codes、CXL 原向量精排；attention 的 V、GQA 和逐 head mask 是新增适配问题。
@@ -31,4 +50,4 @@
 
 `logits + V` 的 GPU 路径是对 proposal 已有 exact-logit 复用接口的优先实验化，不作为已证实的新颖性主张。独立 head 的 FlashInfer adapter 也是接口基线，尚未证明 kernel 效率。
 
-所引用 API 的固定源码版本及具体入口见 [ENVIRONMENT.md](ENVIRONMENT.md)。
+当前安装组件、固定版本和重建命令见 [DEVELOPMENT.md](DEVELOPMENT.md)。

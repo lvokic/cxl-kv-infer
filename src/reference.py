@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 import numpy as np
 
-from .trace import GroupTrace
+from kv_trace import GroupTrace
 
 
 @dataclass(frozen=True)

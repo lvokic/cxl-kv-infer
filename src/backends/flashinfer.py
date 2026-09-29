@@ -8,8 +8,8 @@ See docs/ENVIRONMENT.md for the inspected upstream version, not a tested lock.
 import math
 import numpy as np
 
-from ..reference import AttentionState, empty_state
-from ..trace import GroupTrace
+from reference import AttentionState, empty_state
+from kv_trace import GroupTrace
 
 
 def selected_attention_flashinfer(

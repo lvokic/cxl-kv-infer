@@ -1,0 +1,5 @@
+# CPU trace/reference tools; no CUDA dependency.
+# Resolved versions and hashes are recorded in core.lock.
+numpy==2.5.3
+pip
+setuptools>=77.0.3

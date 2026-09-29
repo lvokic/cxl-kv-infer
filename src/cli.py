@@ -11,8 +11,8 @@ import sys
 
 import numpy as np
 
-from .reference import selected_attention
-from .trace import GroupTrace, synthetic_trace
+from reference import selected_attention
+from kv_trace import GroupTrace, synthetic_trace
 
 
 def describe(trace: GroupTrace) -> dict:
@@ -63,7 +63,7 @@ def main() -> None:
         if args.backend == "reference":
             state = selected_attention(trace)
         else:
-            from .backends.flashinfer import selected_attention_flashinfer
+            from backends.flashinfer import selected_attention_flashinfer
             state = selected_attention_flashinfer(trace, device=args.device, dtype=args.dtype)
         digest = hashlib.sha256()
         with args.trace.open("rb") as handle:
