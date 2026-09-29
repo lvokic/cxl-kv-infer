@@ -1,0 +1,34 @@
+{
+  "recorded_date": "2026-09-29",
+  "status": "initial observations; re-inspect before experiments",
+  "cpu_model": "Intel Xeon 6530P",
+  "sockets": 2,
+  "physical_cores_per_socket": 32,
+  "gpu": {
+    "ordinal": 0,
+    "model": "NVIDIA A100-PCIE-40GB",
+    "pci_bus_id": "0000:8b:00.0",
+    "numa_node": 1,
+    "observed_link_speed": "16 GT/s",
+    "observed_link_width": 16
+  },
+  "nodes": {
+    "0": {"role": "remote DRAM control", "reported_memory_mb": 64078, "cpus": "0-31,64-95"},
+    "1": {"role": "GPU-local DRAM", "reported_memory_mb": 64436, "cpus": "32-63,96-127"},
+    "3": {"role": "owner-confirmed memory-only CXL", "reported_memory_mb": 262144, "cpus": ""}
+  },
+  "planned_placement": {
+    "canonical_cold_kv_node": 3,
+    "index_node": 1,
+    "metadata_node": 1,
+    "staging_node": 1,
+    "initial_worker_cpus": "32-39",
+    "comparison_backing_nodes": [1, 0, 3]
+  },
+  "notes": [
+    "This JSON records intent. The initial replay CLI does not enforce placement.",
+    "NUMA distance 20 does not establish equal bandwidth or PCIe root topology.",
+    "nvidia-smi CUDA Version is driver capability, not proof of an installed toolkit.",
+    "CXL attachment/root topology and buffer residency need separate verification."
+  ]
+}

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cxl-kv-replay"
+version = "0.1.0"
+description = "Fixed-selection attention replay for GPU, DRAM and CXL research"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.26,<3"]
+
+[project.optional-dependencies]
+gpu = ["torch", "flashinfer-python"]
+ann = ["faiss-cpu"]
+
+[project.scripts]
+cxl-kv-replay = "cxl_kv_replay.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
