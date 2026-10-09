@@ -35,7 +35,7 @@ trace 包和 `cxl-kv-infer --help` 不导入 PyTorch / Transformers。CUDA 命�
 
 ## 运行模型
 
-模型模块在 [`src/module/`](../src/module/README.md)。默认环境中已下载
+模型模块在 [`src/module/`](../src/module/)。默认环境中已下载
 HuggingFaceTB/SmolLM2-135M-Instruct，固定 revision
 `12fd25f77366fa6b3b4b768ec3050bf629380bac`。权重缓存在忽略的 `data/models/`，run 输出在忽略的
 `runs/`。模型/环境结果不能因此视为 CXL placement、质量评估或性能 benchmark。

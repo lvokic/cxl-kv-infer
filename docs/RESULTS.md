@@ -9,8 +9,12 @@ FP64 是 CPU 数学参考，用于减少参考自身的舍入误差；它不代�
 | 对照 | 固定逐元素容差 | 实际执行 |
 |---|---|---|
 | FP64 vs scalar oracle / partial merge | output 与 natural-log LSE: `atol=rtol=1e-12` | 33 个合成 trace、空分区和 merge 检查 |
-| BF16 FlashInfer | output `2e-3 / 8e-3`；LSE `2e-4 / 2e-6` | CPU/GPU 共 644 项检查通过 |
-| FP16 FlashInfer | output `2e-4 / 1e-3`；LSE `2e-4 / 2e-6` | CPU/GPU 共 644 项检查通过 |
+| BF16 FlashInfer | output `2e-3 / 8e-3`；LSE `2e-4 / 2e-6` | 包含在 GPU run 总计 644 项检查中，全部通过 |
+| FP16 FlashInfer | output `2e-4 / 1e-3`；LSE `2e-4 / 2e-6` | 包含在同一个 GPU run 总计 644 项检查中，全部通过 |
+
+2026-09-30 只读核对原始 summary/checks 后修正数量口径：CPU reference run 为 482 项；GPU run
+为 644 项，包含 reference、BF16/FP16、契约和 CLI 检查。644 不是每种 dtype 的独立计数，也不应
+把共享 reference 项相加解释为不同输入数量。本次没有重跑数值实验。
 
 最大 output 绝对误差：FP64 `5.24e-14`、BF16 `1.9493e-3`、FP16 `2.4414e-4`；最大 natural-log LSE 误差分别为 `5.6843e-14`、`1.9041e-5`、`1.9041e-5`。合成输入的输出范围限定在 V∈[-1,1]。
 

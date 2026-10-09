@@ -1,8 +1,8 @@
 # CXL-KV Replay
 
-固定逐 head 选集，探索 GPU / DRAM / CXL 上的 sparse attention 执行路径。
+面向持续多轮、超长上下文 KV 的 IVF 向量检索与 partial attention，探索 GPU / DRAM / CXL 上的更新、维护和执行成本。
 
-**起始点：单个 KV group 的 trace replay → 单层 → 模型 decode。** 先用 NumPy 参考实现和 FlashInfer 建立相同 mask 的执行基准；再加入 NUMA store、CPU partial 和精排数据复用。首轮研究对象是候选 K 精排之后，`K + V`、`exact logits + V`、CPU partial 三条路径的成本。
+**起始点：persistent session trace → 单个 KV group → 单层 → 模型 decode。** 先实现跨 turn KV 保留和 IVF-Flat snapshot + delta 的正确性，再研究 compaction/rebuild 与 partial attention；随后扩到 NUMA DRAM 和 memory-only CXL。
 
 ## 交付状态
 
@@ -59,10 +59,13 @@ executor 会对选中行重算精确 QK logits，selector 输出会记录 host K
 
 ## 文档
 
+- [具体探索与 NUMA 实施计划](plan.md)：任务依赖、框架/语言选型、统一 CPU/DRAM 层与 CXL 层协同、benchmark/baseline 与拟议验收。
 - [交付状态](docs/HANDOFF.md)
+- [中文研究提案](docs/PROPOSAL.md)：多轮 IVF、索引替换、效率/有效性/内存管理与实验设计。
 - [架构与数据契约](docs/ARCHITECTURE.md)：模块分层、mask、trace、partial、KLease、位置与精度。
+- [索引生命周期](docs/INDEX_LIFECYCLE.md)：追加、追赶、版本发布、槽位复用与安全回收。
 - [开发与运行](docs/DEVELOPMENT.md)：环境重建、模型入口、trace CLI 和硬件起点。
-- [研究计划](docs/RESEARCH.md)：QUEST/RetroInfer 框架对照、实验顺序和计量口径。
+- [研究计划](docs/RESEARCH.md)：当前优先级、实验顺序和计量口径。
 - [已执行结果](docs/RESULTS.md)：合成与真实模型数值记录及其范围。
 - [来源与版本](docs/PROVENANCE.md)：wiki 输入、上游代码 commit 和依赖版本。
 

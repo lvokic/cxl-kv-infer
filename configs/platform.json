@@ -13,22 +13,96 @@
     "observed_link_width": 16
   },
   "nodes": {
-    "0": {"role": "remote DRAM control", "reported_memory_mb": 64078, "cpus": "0-31,64-95"},
-    "1": {"role": "GPU-local DRAM", "reported_memory_mb": 64436, "cpus": "32-63,96-127"},
-    "3": {"role": "owner-confirmed memory-only CXL", "reported_memory_mb": 262144, "cpus": ""}
+    "0": {
+      "role": "CPU/DRAM tier member",
+      "reported_memory_mb": 64078,
+      "cpus": "0-31,64-95"
+    },
+    "1": {
+      "role": "CPU/DRAM tier member; GPU-local placement candidate",
+      "reported_memory_mb": 64436,
+      "cpus": "32-63,96-127"
+    },
+    "3": {
+      "role": "owner-confirmed memory-only CXL tier member; observed online",
+      "reported_memory_mb": 262144,
+      "cpus": ""
+    },
+    "2": {
+      "role": "owner-designated memory-only CXL tier member",
+      "observed_online": false,
+      "reported_memory_mb": null,
+      "cpus": null
+    }
   },
   "planned_placement": {
-    "canonical_cold_kv_node": 3,
-    "index_node": 1,
-    "metadata_node": 1,
-    "staging_node": 1,
-    "initial_worker_cpus": "32-39",
-    "comparison_backing_nodes": [1, 0, 3]
+    "cpu_worker_node_pool": [
+      0,
+      1
+    ],
+    "cpu_dram_node_pool": [
+      0,
+      1
+    ],
+    "cxl_node_pool": [
+      2,
+      3
+    ],
+    "index_node_pool": [
+      0,
+      1
+    ],
+    "metadata_node_pool": [
+      0,
+      1
+    ],
+    "builder_node_pool": [
+      0,
+      1
+    ],
+    "staging_preferred_node": 1,
+    "comparison_backing_tiers": [
+      "cpu_dram",
+      "cxl"
+    ],
+    "availability_policy": "reject unavailable requested nodes; cxl3_only is a separately selected and recorded experiment profile"
   },
   "notes": [
     "This JSON records intent. The initial replay CLI does not enforce placement.",
     "NUMA distance 20 does not establish equal bandwidth or PCIe root topology.",
     "nvidia-smi CUDA Version is driver capability, not proof of an installed toolkit.",
-    "CXL attachment/root topology and buffer residency need separate verification."
-  ]
+    "CXL attachment/root topology and buffer residency need separate verification.",
+    "Owner clarification 2026-10-09: nodes 0/1 form one logical CPU/DRAM tier; nodes 2/3 form the CXL tier. No fixed foreground/background socket roles.",
+    "Current kernel online/has_memory exposes only 0,1,3. Node 2 capacity and placement are unverified; confirm the discrepancy with lab operators before a dual-CXL-node experiment."
+  ],
+  "design_updated_date": "2026-10-09",
+  "observed_online_nodes": [
+    0,
+    1,
+    3
+  ],
+  "logical_tiers": {
+    "cpu_dram": {
+      "configured_nodes": [
+        0,
+        1
+      ],
+      "observed_online_nodes": [
+        0,
+        1
+      ]
+    },
+    "cxl": {
+      "configured_nodes": [
+        2,
+        3
+      ],
+      "observed_online_nodes": [
+        3
+      ],
+      "unavailable_configured_nodes": [
+        2
+      ]
+    }
+  }
 }
