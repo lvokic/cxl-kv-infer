@@ -1,0 +1,47 @@
+{
+  "faiss_cpu": {
+    "role": "serialized_control",
+    "kinds": ["flat", "ivf_flat"],
+    "metrics": ["inner_product"],
+    "dependencies": {"faiss-cpu": "1.15.1"},
+    "repository": "https://github.com/facebookresearch/faiss",
+    "reference": "https://github.com/facebookresearch/faiss/wiki/FAQ",
+    "concurrency_evidence": "CPU search/search supported upstream; search/add and add/add unsupported. Our adapter serializes all operations.",
+    "maintenance_evidence": "Retrain into a new owner; lifecycle replacement belongs to this project."
+  },
+  "hakes": {
+    "role": "primary_cpu_concurrent_ivf_candidate",
+    "kinds": ["ivf_pq_fastscan"],
+    "metrics": ["inner_product"],
+    "dependencies": {},
+    "repository": "https://github.com/nusdbsystem/HAKES-Search",
+    "revision": "9fbe8b99371c70d854618cff6de60e9986f4bd95",
+    "reference": "https://www.vldb.org/pvldb/vol18/p3049-ooi.pdf",
+    "source_archive": "artifacts/upstream/hakes-9fbe8b9.tar.gz",
+    "source_archive_sha256": "8de74f1e40db97ed89b78604d26ceb8f7924eee2e19187fc2540849fc93a7414",
+    "concurrency_evidence": "Paper Figure 10 measures concurrent read/write. Source uses per-list shared/exclusive locks; UpdateParams requires external synchronization.",
+    "maintenance_evidence": "No project prefix snapshot, bounded replacement or verified NUMA allocator; filter-only mode permits external canonical-K refinement."
+  },
+  "quake": {
+    "role": "adaptive_maintenance_comparison",
+    "kinds": ["ivf_flat"],
+    "metrics": ["inner_product"],
+    "dependencies": {},
+    "repository": "https://github.com/marius-team/quake",
+    "revision": "0651c88c5c71343191ef06ee4ed292cb4a01e1aa",
+    "reference": "https://www.usenix.org/system/files/osdi25-mohoney.pdf",
+    "concurrency_evidence": "OSDI paper Section 8.2 describes serialized search/update/maintenance; copy-on-write concurrency is future work, not an integration guarantee.",
+    "maintenance_evidence": "Adaptive partition split/merge and query-adaptive probe selection; full adapter and pinned source audit still required."
+  },
+  "sivf": {
+    "role": "gpu_streaming_publication_reference",
+    "kinds": ["ivf_flat"],
+    "metrics": ["l2"],
+    "dependencies": {},
+    "repository": "https://github.com/hpdic/ElasticIVF",
+    "revision": "c41c59d8f65e7a1eefac4aba500e8b6f17b6f546",
+    "reference": "https://arxiv.org/abs/2601.11808v3",
+    "concurrency_evidence": "GPU-resident streaming mutation reference; does not establish CPU/CXL concurrency or project visibility.",
+    "maintenance_evidence": "Previous source audit found L2 and MAX_K=32 in the streaming path; IP/d=128/candidate_k=1024 require implementation and validation before admission."
+  }
+}

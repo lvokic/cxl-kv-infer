@@ -1,5 +1,5 @@
 # Linux x86_64 / CPython 3.12 / A100 (SM80).
-# Resolve torch from its official cu130 index; see docs/ENVIRONMENT.md.
+# Resolve torch from its official cu130 index; see docs/DEVELOPMENT.md.
 -r core.in
 torch==2.14.0+cu130
 flashinfer-python[cu13]==0.7.0

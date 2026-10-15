@@ -1,6 +1,6 @@
 # 面向多轮超长上下文的持续 IVF 检索与分层 partial attention 系统
 
-研究提案，更新：2026-09-30。目标平台为单节点 PCIe A100、CPU DRAM 和 memory-only CXL；本提案中的机制与预期贡献尚待实验验证。本文件是结合当前源码、既有实验和新索引生命周期想法的中文修订稿；按 owner 要求同步至 [wiki research 提案](../../kvcache-wiki/raw/research/CXL_KV_Research_Proposal_2026-09-28.md)，旧稿版本记录见 [PROVENANCE.md](PROVENANCE.md)。
+研究提案，更新：2026-10-13。目标平台为单节点 PCIe A100、CPU DRAM 和 memory-only CXL；本提案中的机制与预期贡献尚待实验验证。本文件结合当前源码、既有实验和 owner 明确的多轮时序。2026-09-30 稿曾按 owner 要求同步至 [wiki research 提案](../../kvcache-wiki/raw/research/CXL_KV_Research_Proposal_2026-09-28.md)；本次仅修改本仓库，wiki raw 保持原状。版本与证据边界见 [PROVENANCE.md](PROVENANCE.md)。
 
 ## 1. 背景与动机
 
@@ -10,11 +10,17 @@
 
 因此，研究对象是整个 session 的索引与 attention 生命周期。只在固定 prompt 上建一次索引，随后仅报告 decode 延迟，会隐藏新轮追加、索引维护、峰值分配和老版本回收的代价。应同时解释：插入是否足够便宜、索引何时仍值得复用、何时更换，以及维护是否挤占真正需要的查询带宽。
 
+具体起点是已有约 100K 历史与可查询 IVF 的多轮 session。本轮 decode 继续积累 delta，
+定期沿用现有参数插入活动索引；**full rebuild 只在下一轮 prefill 开始时决定并启动**。
+下一轮既有历史 K 可立即供索引 builder 使用，新 suffix 的 prefill 再逐层提供新增 K。
+prefill 窗口提供调度机会，但不是免费隐藏维护的保证：赶不上的构建、追赶和发布计入新轮
+TTFT。GPU 保留有限 prefix/热点 KV，GPU partial 与 CPU 历史 partial 合并为最终 attention。
+
 ### 1.2 为什么选择 IVF 与替换式维护
 
 IVF 将 coarse routing、list 扫描和候选精排分开，方便控制新条目的 assignment/encoding 与 list append，也方便把 codes、ID 和原 K 分层放置。它并不保证优于图索引：attention 的 Q/K 分布差异、偏斜、较高 nprobe、分散 K gather 和小批开销都可能使其变慢。当前主线先选择 IVF，以隔离持续更新和内存生命周期；图索引暂不作为核心开发。
 
-一个可探索的机制是：不在在线索引上“清空再重建”，而是在另一个已预留槽位建立新版本，追赶写入后切换 manifest 指针，等旧查询结束再回收。索引槽位以环形方式复用，减少反复分配和大范围 reset。prefill 逐 layer 产生 K/V，又为逐层建索引和 scratch 复用提供调度机会。
+一个可探索的机制是：下一轮 prefill 开始时在另一个已预留槽位建立新版本，追赶该次 prefill 写入后切换 manifest 指针，等旧查询结束再回收。索引槽位以环形方式复用，减少反复分配和大范围 reset。轮内 delta flush 只追加条目，不换 centroid/codebook；prefill 的逐 layer 调度为逐层建索引和 scratch 复用提供机会。
 
 这些机制有先例：HAKES 涉及 CPU 并发插入与 filter-refine，SIVF 涉及 GPU streaming append 的发布安全，InSituANN 提供 snapshot/delta 与替换式维护参照，Quake 研究自适应维护。[R1–R4] 本研究要验证它们在多轮、小批 Q、逐 token 更新和 attention 质量约束下的适配，而不是把指针切换本身包装成贡献。
 
@@ -40,10 +46,10 @@ GPU kernel 可以进入实现，但前提是实测表明 gather、masked GQA、s
 |---|---|
 | post-training sparse decode、真实 post-RoPE Q/K、标准 scaled inner product | 不训练新 sparse 模型，不把 cosine 或 PQ 分数当 attention logits |
 | IVF-Flat 控制、紧凑 SQ/PQ 候选、exact K refine、partial attention | 先固定 selector 语义，再分别测维护、执行优化 |
-| session 级 append、compact/retrain/replacement、索引槽位池与有界回压 | 首轮单 writer，无通用事务、crash durability 或并发图 mutation |
+| 轮内定期 delta 插入、下一轮 prefill 开始的 rebuild/replacement、索引槽位池与有界回压 | 首轮单 writer；decode 不做全量重建；无通用事务、crash durability 或并发图 mutation |
 | 原始 K/V 分离后备、GPU 热区、DRAM 索引、真实 CXL placement | memory-only CXL 不运行 compute；GPU direct/mapped access 为可选独立路径 |
 | dense causal 增量 prefill 与必要的有界读取/缓存协作 | 不把新 prefill 稀疏算法作为核心；当前 runner 尚不支持长历史 streaming prefill |
-| 固定选集的 CPU/GPU 执行对照；测量后考虑 CUDA/SIMD 热点 | 不重建 serving engine；多 GPU/PP、跨租户 prefix sharing、KV 淘汰留待后续 |
+| GPU hot + CPU history partial 主路径，固定选集执行对照；测量后考虑 CUDA/SIMD 热点 | GPU cache 为同 session 有预算的副本；多 GPU/PP、跨租户 prefix sharing、KV 淘汰留待后续 |
 
 1M 索引持续性不等于 1M 模型能力。真实 1M 端到端依赖适合的 checkpoint、模型 adapter、RoPE 契约和 chunked/offloaded prefill；现有 Llama-family adapter 不能直接接任意模型。模型/benchmark 均本地运行，固定 revision 或文件散列，不依赖远程推理 API。
 
@@ -53,7 +59,7 @@ GPU kernel 可以进入实现，但前提是实测表明 gather、masked GQA、s
 
 | 问题 | 核心假设 | 可能推翻它的结果 |
 |---|---|---|
-| Q1：何时复用，何时维护？ | 生命周期决策能比固定每 turn rebuild 或永不 rebuild 更便宜地保持质量 | 固定 centroid + 调 nprobe 已同样有效，rebuild 无法摊销 |
+| Q1：哪些 turn 的 prefill 开始值得重建？ | 轮内低成本 delta 插入 + 边界决策能比每轮 prefill 重建或永不重建更便宜地保持质量 | 固定 centroid + 调 nprobe 已同样有效，rebuild 无法摊销或明显拉长 TTFT |
 | Q2：索引替换能否稳定持续更新？ | layer-aware 槽位复用、追赶和 reader retirement 可限制暂停/峰值 | 追赶无法收敛、退役过慢或内存预算不可满足 |
 | Q3：检索与执行的交接是否浪费？ | KLease/exact-logit handoff 可减少重复 K 读取与 H2D | 额外租约、状态传输和同步吃掉收益 |
 | Q4：何时值得优化 GPU kernel/分流？ | 同一 mask 下物理 span、GQA overlap 和 residency 能指示更快路径 | whole-group/成熟 FlashInfer 已接近最优，mask/merge 开销更大 |
@@ -62,7 +68,7 @@ GPU kernel 可以进入实现，但前提是实测表明 gather、masked GQA、s
 
 ### 3.2 候选贡献及证据要求
 
-1. **多轮 attention 索引生命周期的经验模型与决策机制。** 区分 Q drift、K drift、list skew 和 query-count horizon，选择继续复用、调 probe、compact 或 retrain。要在相同质量和资源下优于强固定策略，并报告审计/预测成本。
+1. **多轮 attention 索引生命周期的经验模型与决策机制。** 在轮内固定参数 delta 插入、轮间 prefill 开始才允许重建的边界内，区分 Q drift、K drift、list skew 和 query-count horizon，选择哪些 turn 重建及逐层调度。要在相同质量和资源下优于强固定策略，并报告审计、预测和 TTFT 成本。
 2. **在质量和内存预算内的替换式维护。** 研究逐层 build、受限版本槽位、可见水位与追赶、异步 retirement 的协作，使持续插入、query P99 和峰值容量可解释。RCU、双缓冲、ring 和内存池本身均不是新概念。
 3. **检索到 partial attention 的高效物理交接。** 保持逐 head 语义，复用 exact K/logits，晚获取 V；若 GPU kernel 或有限混合分流提供端到端净收益，再作为效率贡献。
 
@@ -80,44 +86,52 @@ GPU kernel 可以进入实现，但前提是实测表明 gather、masked GQA、s
 
 | 面板 | 阅读重点与责任边界 |
 |---|---|
-| (a) System Framework | GPU HBM 保存权重、有限热 KV 和执行缓冲；CPU/local DRAM 保存索引、目录与控制状态；memory-only CXL 保存冷 K/V。生命周期与预算管理器协调在线读、维护和回收。冷数据经 CPU 读取与 staging 后送 GPU，或由 CPU 执行 partial。 |
-| (b) Layer-wise Build | 每层产生 K 后做 assignment/encoding，建立该层/group 的持久索引；V 进入独立 backing。构建 scratch 按层复用，活动索引不能被下一层覆盖；所有构建时间与流量计入 TTFT。 |
+| (a) System Framework | GPU HBM 保存权重、有限 prefix/热 KV 与执行缓冲；CPU/DRAM 保存 IVF、delta 和目录；CXL 保存冷 K/V。GPU 计算已驻留部分，CPU 读取选中历史并计算另一部分，回传小 partial state 后合并。packet 为搬运/缓存安装对照。 |
+| (b) Layer-wise Build | 重建准入只发生在下一轮 prefill 开始，已保留历史 K 可立即参与建造；新 suffix 逐层产生的 K 被追加、追赶。scratch 按层复用，活动索引不能被下一层覆盖；赶不上时延长 prefill，计入 TTFT。 |
 | (c) Query & Partial Attention | Q 查询 IVF，候选经 canonical K 精排成为逐 head CSR 选集，再获取选中 V。KLease/exact logits 可交接；GPU/CPU partial 汇入同一 merge，输出 normalized output 与自然对数 LSE。精确 tail 覆盖全部尚未 indexed 的合法 KV。 |
-| (d) Incremental Append | 初始化 K/V 与条目后发布；只有 K 用于索引 assignment/encoding，V 保持独立所有权。append log 与有界 pending tail 保护新数据和复制中条目；共同水位不跨过未完成 hole。 |
-| (e) Replace & Reclaim | 在空闲槽构建新索引并追赶日志，以完整 manifest 切换活动版本。旧版本等 reader、CPU task、CUDA/DMA 与安装事件结束后复用；切换指针不免除 build/catch-up/drain 的成本。 |
+| (d) Incremental Append | 轮内维护完整 delta，按活动参数定期 assignment/encoding 并插入 IVF；完全发布后才从新 delta 视图移除。V 保持独立所有权，共同水位不跨 hole，重叠 ID 按 head 去重。 |
+| (e) Replace & Reclaim | 在 prefill 窗口的空闲槽建新索引并追赶日志，进入 decode 前发布完整 manifest。旧索引等实际借用它的任务结束后复用；独立 KV/缓存/传输 owner 等各自事件；切换不免除 build/catch-up/drain 成本。 |
 
 | 组件 | 特定问题领域 | 主要功能与协作 |
 |---|---|---|
 | 持续 Session / ModelAdapter | 多轮语义与 KV 重用 | 保留 cache，验证 chat prefix，追加 suffix，提供真实 Q、new K/V、position 和事件 |
 | KV owner / backing 目录 | 大容量存储与一致地址 | K/V 分离，稳定 token IDs，记录 tier/地址/水位，提供 lease 与安全回收 |
 | IVF selector | 动态向量检索 | coarse routing、codes/list 扫描、逐 head candidates；原始 scaled IP 精排前不声明 exact |
-| 维护控制器 + 索引槽位池 | reuse/rebuild、峰值与暂停 | 观察过去统计，限制并发 rebuild，追赶 tail，原子发布 manifest，延迟复用旧槽 |
+| 维护控制器 + 索引槽位池 | reuse/rebuild、峰值与暂停 | 轮内 flush；在下一轮 prefill 开始以过去统计决定重建，逐层追赶、发布，延迟复用旧槽 |
 | K 精排与 Selection | 检索误差与重复读 | candidate union 批量读取 K、per-head refine；交接选中 K lease / 真 logits |
 | Work/credits 规划 | 稀疏访问、带宽竞争 | 根据实际 residency、span、membership 形成有限 routes，约束读取/传输/维护 |
 | CPU/GPU partial executors | attention 核心执行 | GPU resident/packet、CPU historical partial；输出自然对数 LSE 与 normalized output |
 | 测量与 artifact | 证据和可复现性 | 保存源码版本、模型、stream、placement、timing、bytes、quality 与失败记录 |
 
-拟议实现沿现有 `src/module/` 扩展模型/session 接入；后续按实际实现增加 `src/index/`、`src/storage/`、`src/retrieval/` 和 `src/execution/`。Python/NumPy 做 reference/control，Faiss 为索引对照；native/CUDA 仅用于测得的热点。不会仅为文档创建空目录。
+拟议实现沿现有 `src/module/` 扩展模型/session 接入；`src/index/` 与 `src/storage/` 已有独立基础源码，`src/retrieval/` 和 `src/execution/` 按实际实现增加。Python/NumPy 做 reference/control；HAKES-Index 的 CPU 并发 filter library 优先接入，Faiss 为 exact/串行索引对照，Quake 为 adaptive maintenance 对照。HAKES adapter 未实现；源码审计与步骤见 [plan §5](../plan.md#5-ivf-与相关系统的选型)。自研 native/CUDA 优化仅用于测得的热点，不为文档创建空目录。
 
 ### 4.2 Session、prefill 与 append
 
 同一 session 横跨 user/assistant turns；不重放历史文本。完整 chat-template token prefix 必须与已提交 cache 匹配，验证后追加新 suffix；position 单调延续、causal mask 以全历史长度为基准。现有 greedy loop 最后一个 emitted token 尚未前向，目标 runner 显式管理 pending token、EOS 与模板后缀，在下一 turn 前提交且避免重复。
 
-prefill 在各层产生 K/V 后触发 index append/build，可复用该层 construction scratch 并与 offload 协作。索引 build 并非免费，可能争用模型计算和链路；记录其对首轮、新轮 TTFT 的影响。真实长历史 prefill 必须有 dense causal 的有界 chunking/streaming 或成熟后端支撑，不能只凭 index 到 1M 宣称模型可运行。
+本轮已有大量历史和活动索引，decode 新 K/V 进入有界 delta；达到批量/时间阈值时按既有参数插入索引，不触发全量重建。下一轮 prefill 开始才准入 rebuild，先扫描已经存在的历史 K，再追赶各层新产生的 K；不为建索引重算历史模型前向。CPU builder 与 GPU 新 suffix prefill 可以尝试重叠，construction scratch 按层复用。初版在 prefill→decode 边界完成追赶与发布；赶不上时显式延长 prefill，预算不足则在开始时跳过本次重建。竞争、等待、构建与流量均计入新轮 TTFT。真实长历史 prefill 必须有 dense causal 的有界 chunking/streaming 或成熟后端支撑，不能只凭 index 到 1M 宣称模型可运行。
 
 ### 4.3 IVF 表示、增量与质量
 
-首先实现 ID-only IVF-Flat list 控制：索引只存 ID、centroid/list 目录，精确扫描指向 canonical K；Faiss 全量 Flat/IVF-Flat 另作对照，记录其向量复制和实际 ID 宽度。随后加入 SQ/PQ codes，候选只负责过滤，final ranking 一律来自真实 post-RoPE K。
+以 exact FlatIP 和串行 Faiss IVF 建立质量/更新对照，同时接入 HAKES 的并发 PQ4 filter，
+原始 K/V 由我方 owner 管理。ID-only IVF-Flat 是分离 K 副本和 gather 成本的控制变体，
+不再把“先完整实现自管 IVF，之后才看强基线”作为依赖。索引是否压缩、额外向量副本与 ID
+宽度均明示；候选只负责过滤，final ranking 一律来自真实 post-RoPE K。主接入候选的公开
+并发证据不构成在本机 d=128、小批 GQA、多轮 attention 上优于对照的结论。
 
 每个 layer/KV group 建一套索引，Q heads 共用 K/codes，保持独立 candidates 和 top-k。training/assignment/query metric 必须一致并记录；centroid 的 routing normalization 不得改变 canonical K 或原 attention IP。跨 session 复用 centroid/codebook 是独立消融，不能默认无损。
 
 bootstrap 使用当前可用 K；未训练、尚未 indexed 或尚未 backed 的合法数据使用 exact tail。pending tail 必须有界且完整覆盖未发布后缀；sink/window/current-token 与历史命中交集去重。扩大 nprobe 只能改善被访问候选，不是未访问 token 质量的证书。
 
+轮内 delta flush 的发布顺序为条目初始化/可见 → indexed prefix 与 delta 描述整体推进 →
+旧 delta 读者结束后回收。它保持当前参数和 generation，不清空原索引。完整可见前缀内
+不能遗漏新数据；重建 append log 只记新增 ID/K 引用，用于追赶，不代替查询可读 delta。
+
 ### 4.4 索引槽位、追赶与 pointer swap
 
 每个空间拥有活动 manifest，绑定 centroid/codebook、base、delta/tail 描述、KV 布局版本和可见 token 水位。reader pin 与 writer publication 使用安全协议；MVP 用短锁、单 writer 和显式 reader leases。
 
-replacement slot 先构建完整前缀，再追赶 build 期间的 append log。在有界提交门确定 cutover，完成 catch-up 并整体发布新 manifest。若 codebook/centroid 改变，新增向量必须按新参数编码，不能直接拼接旧 codes。旧读者继续使用旧 version；CUDA、DMA、CPU task 和 cache install 完成后才可回收。失败构建不影响活动版本。
+replacement 由下一轮 prefill 开始触发，在空闲 slot 建已有完整前缀，再追赶本次 prefill 的 append log。在 prefill 结束前的有界提交门确定 cutover，完成 catch-up 并整体发布新 manifest，再进入 decode。若 codebook/centroid 改变，新增向量必须按新参数编码，不能直接拼接旧 codes。旧读者继续使用旧 version；索引只等实际借用它的任务，独立 KV、缓存和传输 buffer 另等自己的 completion。失败构建取消 B，保留完整活动版本与 delta。退役回收可延后，full rebuild 不跨入 decode。
 
 二/三槽复用只降低分配/reset 开销，不使构建、catch-up 或 reader drain 成为零。每层/group 的活动索引都要保留；优先全局限制“一次额外构建一个 layer/group”，scratch 跨层复用。逻辑清空使用 generation/valid length 隔离旧条目，重复地址使用 generation 防止 ABA。详见 [INDEX_LIFECYCLE.md](INDEX_LIFECYCLE.md)。
 
@@ -129,7 +143,7 @@ replacement slot 先构建完整前缀，再追赶 build 期间的 append log。
 
 allocator 分别管理 index slot pool、KV extents、candidate K pool、pinned/H2D packet ring 和 partial workspace。记录 logical live、allocated/reserved、RSS、fragmentation/slack、peak 和真正可复用的时间。HBM budget 先扣权重和模型 workspace；DRAM budget 同时容纳 active+retired index、builder、staging；CXL budget 包含 canonical payload 与后备余量。释放 owner 不等于释放物理容量。
 
-平台初始记录为 A100-PCIE-40GB，GPU-local node 1，CXL memory-only node 3。硬件运行前重新核对 topology/驻留。基线路径是 CPU 读取 DRAM/CXL 后 pinned staging→PCIe→GPU，或 CPU 原地 partial；不假设 GPU 原生直接访问 CXL。只绑定具体 allocation 与 worker，不把整个进程绑到 CXL node。
+平台初始记录为 A100-PCIE-40GB，GPU-local node 1，CPU/DRAM 层为 node 0/1，CXL 层为 node 2/3（当前仅观察到 3）。硬件运行前重新核对 topology/驻留。主路径由 CPU 原地计算选中历史 partial、GPU 计算热 KV partial，CPU 回传状态后合并；pinned staging→PCIe→GPU 为 packet 对照和热缓存安装路径，不假设 GPU 原生直接访问 CXL。只绑定具体 allocation 与 worker，不把整个进程绑到 CXL node。
 
 ### 4.6 Partial attention、K/logits 复用与 GPU kernel
 
@@ -137,7 +151,12 @@ allocator 分别管理 index slot pool、KV extents、candidate K pool、pinned/
 
 内部统一为 `(normalized output, natural-log LSE)`；backend 的不同 LSE 底由 adapter 转换。CPU/GPU hot/cold 分区的归并使用稳定 logaddexp，并处理空分区。数学契约与实现证据见 architecture；不是把当前 online output-only executor 当成已实现的跨设备 partial 系统。
 
-先实现固定 GPU K+V packet 和优化 CPU whole-group 控制。按热点再比较：
+主方案先接通固定 GPU 热区 + CPU 历史两路 partial；whole-group CPU 与 GPU K+V packet 是
+控制组。热区可保留同 session prefix/sink 与已观察热点，是有预算的 K/V 副本。对每个
+head 先确定 S_h，再 pin ready GPU resident 集 H：GPU 处理 `S_h∩H`，CPU 处理其余选中
+历史；刚生成尚未下放的 KV 保留可读 GPU owner。同一个被缓存的 ID 可以留在 CPU IVF，
+但不能在两路重复贡献。缓存 promotion 只改变执行位置，安装完成前不算 GPU hit。
+这不同于重新做历史 prefill，也不默认实现跨请求 prompt cache。按热点再比较：
 
 - exact logits + selected V 的 GPU softmax/PV，减少 K 再上传与 QK 再算。
 - masked GQA shared-KV tile，保留 per-head membership，减少当前独立逻辑行可能造成的重复加载。
@@ -149,13 +168,13 @@ kernel 输入使用有界 SoA/CSR/bitmap，post-RoPE K 不按 packet offset 再�
 
 查询和必要 KV 读取优先，预取使用剩余 credits；维护按片运行并给有限进度保证。维护与查询共享 CXL/DRAM/PCIe 带宽，不能分别按独占峰值建成本模型。没有空闲 slot 或 tail 达预算时显式回压，记录是否影响生成。
 
-维护动作按成本由轻到重：调 probe/候选、同参数 compaction、partition 局部维护、centroid/codebook retrain、全 replacement。观测 Q 分布、K assignment residual、list skew、候选量与 tail/backlog；topic switch 不自动触发 full rebuild。在线 recall audit 如需 exact scan，单独收费。
+轮内允许调 probe/候选、按固定参数定期 delta 插入；需要重新组织历史的 compaction、partition split/merge、centroid/codebook retrain 和 full replacement 仅在下一轮 prefill 开始决定并启动。观测过去 Q、K assignment residual、list skew、候选量与 tail/backlog；topic switch 可登记边界需求，不能触发 decode 中的 full rebuild。在线 recall audit 如需 exact scan，单独收费。
 
 决策目标是满足质量、P99 和三层容量约束时，降低预测剩余生命周期成本。只使用已发生 queries 和 past statistics 预测剩余查询量；未来 Q 与事后最优维护点只作为 diagnostic oracle。不保证索引维护始终能摊销，保留直接 scan 和固定参数路线。
 
 ### 4.8 已有代码与实验提供的起点
 
-当前 repo HEAD 为 `60e69caa3d5aff645dae29eec938ab36df86ba64`，文档修订为其上的工作区变化。现有 ModelAdapter、KVCacheLifecycle、TokenSelector、AttentionExecutor 和 trace/reference 已提供可扩展边界，但 DynamicCache 借用不是 native stable store，completion 参数也没有真实等待实现。
+早期数值起点以各自 manifest/source snapshot 为准；2026-10-13 文档修订工作区的基线 HEAD 为 `487dee387079147ff6ea2803bbe1775e94689973`。现有 ModelAdapter、KVCacheLifecycle、TokenSelector、AttentionExecutor 和 trace/reference 已提供可扩展边界，但 DynamicCache 借用不是 native stable store，completion 参数也没有真实等待实现。
 
 既有 CPU numerical run 为 482 项，GPU numerical run 为 644 项且包含 BF16/FP16 与 reference/contract 检查，不应把 644 当作每种 dtype 独立总数。真实固定 revision SmolLM2 的 FP16 最新整理检查 20/20、FP32 18/18，BF16 16/20，四项严格 logits 对照失败。所有结果用于数值/集成，不提供任务质量、动态索引或硬件性能证据。[RESULTS.md](RESULTS.md)
 
@@ -178,17 +197,21 @@ multi-turn trace 记录每轮新增文本 token、assistant 输出 token、主�
 | 阶段 | 固定条件与比较 | 必须保存的证据 |
 |---|---|---|
 | E0：session/生命周期正确性 | 单层/group；base+delta 对 FlatIP；跨 turn template、pending token、current token、holes、reader retirement、失败 build、ABA | 完整 event trace、visible prefix/ID 覆盖、leases、数值与错误记录 |
-| E1：reuse/rebuild | 相同 Q/K stream、质量、cores 和容量；never rebuild、每 turn、固定 delta/年龄、同 centroid merge、periodic retrain、adaptive；全局 vs per-turn segment | 每 turn recall、nprobe、候选量、skew、插入/查询 P50/P99、build/catch-up/drain 和 session 摊销 |
+| E1：reuse/rebuild | 相同 Q/K stream、质量、cores 和容量；never rebuild、每轮 prefill 开始 rebuild、只在部分 prefill 开始 rebuild；轮内 delta flush 批量/周期独立扫描 | 每 turn recall、nprobe、候选量、插入/查询 P50/P99；历史扫描、prefill 重叠/等待、TTFT、build/catch-up/drain 与 session 摊销 |
 | E2：内存管理 | 二/三槽 vs new allocation；逐层 vs 并发 rebuild；logical reset vs 逐项 clear；稳定 token-major vs 受控布局 | peak live/reserved/RSS、allocator churn、scratch、backlog、ready/可复用事件、流量 |
 | E3：有效性 | full→exact top-k→IVF Flat→compressed IVF，同模型/精度与 mandatory policy | top-k recall、保留 attention mass、output/LSE/logit error、逐 turn 任务分数与 free generation |
-| E4：执行效率 | 冻结同一 S_h；whole-group CPU/GPU、hot+history、K/logit reuse、成熟 kernel 与候选 CUDA kernel | Q-ready→output-ready、gather/H2D/plan/run/merge/join、GQA 复用、CPU 占用和 GPU profile |
+| E4：执行效率 | 冻结同一 S_h；GPU hot + CPU history 主路径、缓存预算/命中率、whole-group CPU/GPU packet 控制、K/logit reuse | Q-ready→output-ready、CPU 历史读取/PV、GPU partial、状态回传/merge、缓存安装/淘汰、副本峰值与资源竞争 |
 | E5：真实内存层次/端到端 | local DRAM、remote DRAM、CXL 同 selector/资源；equal-capacity/equal-batch 后再做 DRAM 预算约束 | 页驻留/topology、实测 counters 或清楚命名的逻辑 bytes、TTFT/ITL/TPOT、turn P99、总 session 成本 |
 
 先 E0，再 E1/E2，E3 决定可接受 retrieval budget，E4 优化热点，E5 才形成 CXL/模型系统结论。所有验收条件为拟议方案，本次文档更新不新增或执行测试。
 
 ### 5.3 强基线与公平性
 
-索引比较包含 locked Faiss IVF（调用方负责 add/search 同步）、exact scan、snapshot/delta 固定维护、HAKES 风格并发 filter-refine；InSituANN 风格 replacement 和 Quake 风格动态 partition 为维护参照。[R1,R3,R4,R5] SIVF 仅在 GPU-resident 条件匹配时作为执行 baseline，否则只作协议参考。[R2]
+首轮索引比较包含 exact scan、locked Faiss IVF、HAKES 并发 filter adapter 与原生模式、
+snapshot/delta 固定维护；Quake 的 adaptive partition/NUMA scan 用于维护对照，论文 §8.2
+已说明原实现串行执行 search/update/maintenance。[R1,R4,R5] InSituANN 风格 replacement
+为维护参照。[R3] SIVF 仅在 GPU-resident、metric/k 和可运行条件匹配时作为 baseline，
+否则只作协议参考。[R2] 适配版与上游原生版分别注明变更和复现程度。
 
 固定选集执行基线包含 FlashInfer selected K/V、优化 CPU partial、直接 packet attention、固定 hot/history 分工、静态 whole-group profile。RetroInfer、RetrievalAttention、Fluxion、HiSparse 的机制已覆盖多项相邻能力，具体差异在第 8 节；未运行上游 artifact 时写“机制复现”，不可写成击败原系统。[R6–R10]
 
@@ -210,7 +233,7 @@ timing 保存 CPU monotonic、CUDA events 和统一范围；不直接拼接不�
 
 预期产出是可验证的多轮 IVF/partial attention prototype、公开 workload/event trace、维护策略的生命周期成本曲线，以及 memory budget 与执行路径的适用区域，而不是预先指定加速倍数。
 
-可能的正结果：compact/retrain 在部分漂移场景可摊销；逐层槽位复用限制峰值；K/logits 交接减少冗余读；在合适 GQA/span 形态下 CUDA 或固定分流改善端到端。可能的负结果同样需要保留：仅调 nprobe 足够、codes 小但 K gather 占主导、reader drain 阻碍复用、CXL 共同瓶颈使设备分流无用。
+可能的正结果：选择部分 prefill 开始重建可以摊销维护，轮内 delta 插入保持低成本；逐层槽位复用限制峰值；热 KV 与 CPU 历史 partial 减少冷数据 H2D，K/logits 交接减少冗余读。可能的负结果同样需要保留：仅调 nprobe 足够、prefill 窗口不足导致 TTFT 增加、codes 小但 K gather/PV 占主导、reader drain 阻碍复用、CXL 共同瓶颈使两路执行无收益。
 
 若 exact top-k 本身不满足质量，先改变预算/限定适用层，而不是继续优化 ANN。若 fixed centroid/固定维护已接近 oracle，停止复杂自适应控制；若成熟 executor 已接近最佳，停止自研 kernel；若调度/排序/merge 吃掉收益，退回 whole-group；若端到端主要受模型或 dense prefill 限制，报告边界并调整研究范围。收益依赖更改 mask、降质量或额外资源时，不能作为同语义系统加速结论。
 
@@ -222,10 +245,10 @@ timing 保存 CPU monotonic、CUDA events 和统一范围；不直接拼接不�
 |---|---|
 | M0：框架与数值起点（已有） | 当前小模型生成、capture/replay、FP64/FlashInfer 数值记录；BF16 失败作为待定位问题保留 |
 | M1：持续 session | 增量 turn、pending token、template prefix、position 与原生 full 控制一致；先短 context |
-| M2：动态 IVF correctness | 单层/group，FlatIP、ID-only base+exact tail、安全 append 和 event trace；不先追求并发性能 |
-| M3：替换与有界内存 | 二槽 pool、catch-up、整体 publication、真实 retirement、logical reset 和失败恢复；1M 可控 stream |
+| M2：动态 IVF correctness | 单层/group，HAKES filter/prefix adapter、FlatIP/串行 IVF 控制、完整 delta/tail、定期 flush 和 event trace；固定参数、先 correctness 再并发性能 |
+| M3：替换与有界内存 | 下一轮 prefill 开始准入、逐层二槽 build/catch-up、进入 decode 前发布、真实 retirement 与失败恢复；1M 可控 stream |
 | M4：维护有效性 | 固定与自适应策略、topic/skew、真实 trace 与派生 multi-turn 质量；量化整个 session 摊销 |
-| M5：高效率与内存层次 | native NUMA gather/CPU SIMD；实测热点决定 GPU kernel；接入实际 CXL placement 与 counters |
+| M5：两路 partial 与内存层次 | GPU prefix/热缓存 + CPU 历史 partial、LSE 归并；native NUMA gather/CPU SIMD、实际 CXL placement；实测热点决定 GPU kernel |
 | M6：整模型与论文 artifact | 选定模型全层集成、长 context prefill 依赖、多轮 free generation、公平端到端图表与复现说明 |
 
 M1/M2 是当前最直接的实现任务。M3 的环形复用不会替代 M1 的模型正确性，也不会替代 M5 的真实硬件证据。若 M4 无足够质量/成本空间，收敛研究问题后再投入 M5。

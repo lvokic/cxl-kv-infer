@@ -1,15 +1,30 @@
 # 多轮 IVF 与 NUMA 分层 KV 系统探索计划
 
-更新：2026-10-09。本文是实施与探索计划，任务均为待执行；本轮仅进行了只读系统探测和资料核对，没有安装依赖、运行测试、模型或性能 benchmark。
+更新：2026-10-13。2026-10-09 的调研只进行了只读探测；2026-10-12 已落实技术选型和基础
+infra，安装 Faiss 控制依赖/pybind11、编译 native NUMA bridge、执行只读 prepare。
+随后按 owner 要求将 **HAKES-Index 提升为 CPU 并发 IVF 首选接入候选**，Faiss 只保留控制角色；
+已锁定/下载/静态核对 HAKES 源码，公共接口与配置不再绑定 Faiss。HAKES 尚未构建或接入。
+持续 session、IVF 实际操作、allocation/residency、数值、质量和性能仍待执行。
+主模型为本地 Llama-3.1-8B-Instruct，固定 canonical revision
+`0e9e39f249a16976918f6564b8830bc894c89659`。统一配置在
+[configs/experiment.json](configs/experiment.json)，选型、接口边界和命令合并在
+[DEVELOPMENT.md](docs/DEVELOPMENT.md)，不另建重复计划文档。
 
-起步组合：**Transformers/PyTorch 模型接入 + Faiss CPU IVF 控制路径 + 自管索引生命周期 + FlashInfer 执行基线**。先完成 persistent session、单 KV group、单层的因果数据流，再研究约 1M 向量规模下的追加、复用、替换，以及统一 CPU/DRAM 层 `{0,1}` 与 CXL 层 `{2,3}` 的协同。GPU kernel 的投入由阶段测量决定。
+起步组合：**Transformers/PyTorch 模型接入 + 可替换 IVF 接口（HAKES 优先、Faiss 控制、Quake 维护对照）+ 自管索引生命周期 + FlashInfer 执行基线**。先完成 persistent session、单 KV group、单层的因果数据流，再研究约 1M 向量规模下的追加、复用、替换，以及统一 CPU/DRAM 层 `{0,1}` 与 CXL 层 `{2,3}` 的协同。GPU kernel 的投入由阶段测量决定。
+
+2026-10-13 owner 明确的主方案：本轮从已有大量历史（如 100K）和活动 IVF 开始，维护
+完整 delta，并按批量/周期沿用现有参数插入索引。**full rebuild 只在下一轮 prefill 开始
+决定并启动**，CPU builder 利用保留的历史 K、追赶 GPU 新 suffix prefill 产生的 K；初版在
+进入 decode 前完成发布，赶不上则计入 prefill 延长/TTFT，开始时预算不足就复用 A。
+GPU 缓存有限 prefix/热 KV，GPU partial + CPU 选中历史 partial 合并输出。轮内 delta 阈值
+不能解释成 full rebuild 触发器；两路 partial 属于主数据流，不是后期才考虑的分支。
 
 设计依据：[当前 proposal](docs/PROPOSAL.md)、[用户提供的 proposal](docs/CXL_KV_Research_Proposal_2026-09-28.md)、[架构 HTML](docs/CXL_KV_Architecture_v2.html)、[架构契约](docs/ARCHITECTURE.md)、[索引生命周期](docs/INDEX_LIFECYCLE.md)。本计划细化执行顺序；不替代这些语义契约，也不把目标系统描述成已有实现。
 
 ## 1. 首轮要回答的问题
 
 1. **IVF 是否适合真实 attention 小批查询？** 在逐 head 质量要求下，需要扫描多少 lists/K？查询、精排与插入能否比强 scan 基线更合算？
-2. **何时复用、何时维护？** 固定 centroid、增量 compaction、重新训练和整体替换，在多轮 session 中各自何时能摊销？
+2. **哪些 turn 的 prefill 开始值得重建？** 轮内固定 centroid + delta flush 的批量/周期，与轮间 reuse/rebuild 分开；历史扫描与下一轮 prefill 能重叠多少，额外 TTFT 能否被后续查询收益摊销？
 3. **替换能否长期有界？** append log、exact tail、building/retired 版本和 scratch 是否保持上限？追赶、发布和回收是否产生尾延迟？
 4. **CPU/DRAM 与 CXL 两层如何协作？** 用统一 CPU worker/DRAM 池管理索引、维护和 partial，将冷 KV 放入 CXL 池；在质量与容量约束下如何降低读取、维护和执行总成本？
 5. **检索到执行是否浪费 K？** KLease / exact-logit handoff 能否减少重复读取、H2D 和 QK 计算？
@@ -37,17 +52,19 @@
 
 核对到 CPU 0/64 是同一物理核的 SMT siblings，CPU 32/96 同理。第一轮先使用每个物理核的一个逻辑 CPU；SMT 单独消融，不把 128 个逻辑 CPU 当成 128 个物理核。
 
-前一轮采样 GPU 已使用约 37029MiB、利用率 35%；node 1 的 `free` 约 1092MiB。`free` 不等于可用实验预算，也不能将系统 `available` 全部认领。当前不启动压测，后续先与 owner 协调资源窗口与单 job 上限。
-
 **待核实的平台问题：** PCIe 可见 `33:00.0`、`b4:00.0` 两个 CXL 设备，但没有 `/sys/bus/cxl/devices`。请向实验室运维确认 node 2 未暴露的原因，以及 CXL node 2/3 的物理地址范围、设备/decoder 映射和计数器访问方式；若与实验室配置说明不符，反馈运维。NUMA distance 20 不证明 node 0/1 到 node 3 的路径、带宽或延迟相同。若多个 CXL 设备被合并到一个 NUMA node，不能凭 node ID 宣称已控制具体 endpoint。
 
 ### 2.2 代码与环境
 
-- 项目 HEAD：`60e69caa3d5aff645dae29eec938ab36df86ba64`，已有文档工作区变化；旧实验以各自 manifest/source snapshot 为准。
-- 现有环境：Python 3.12.14、NumPy 2.5.3、PyTorch 2.14.0+cu130、Transformers 4.57.6、FlashInfer 0.7.0、Triton 3.8.0。Faiss 与 pybind11 尚未安装。
+- 2026-10-13 文档工作区基线 HEAD：`487dee387079147ff6ea2803bbe1775e94689973`，已有未提交的 infra/文档变化；旧实验以各自 manifest/source snapshot 为准。
+- 2026-10-09 起点：Python 3.12.14、NumPy 2.5.3、PyTorch 2.14.0+cu130、Transformers 4.57.6、FlashInfer 0.7.0、Triton 3.8.0。
+  2026-10-12 增加 Faiss CPU 1.15.1 / pybind11 3.1.0；旧推理依赖保留。
+  后续将 stock-Faiss 控制依赖 `ann.lock` 与基础 bridge 依赖 `native.lock` 分离。
 - 本地 CUDA 13.0 编译器在项目 `.venv` 内，通过 [with-env.sh](scripts/with-env.sh) 使用；不依赖系统 PATH 中的 `nvcc`。
 - 已有 ModelAdapter / KVCacheLifecycle / TokenSelector / AttentionExecutor、真实 capture 与 standalone replay。
-- 当前 generation 每次结束 request；KV lease 借用 DynamicCache tensor，`release(completion)` 没有实际事件等待。持续 session、稳定 backing、动态 IVF、NUMA allocator 和跨设备 partial 合作尚未实现。
+- 当前 generation 每次结束 request；KV lease 借用 DynamicCache tensor，`release(completion)` 没有实际事件等待。
+  基础 native NUMA extent 已编译、独立 Faiss API 与 journal 已写；尚未执行其运行时验证，也未接到模型路径。
+  持续 session、token backing 目录、动态 IVF/exact tail、异步 retire 和跨设备 partial 合作仍未实现。
 - 既有 CPU 482 项、GPU 合计 644 项数值检查；SmolLM2 FP16 20/20、FP32 18/18，BF16 16/20，四项严格 logits 失败保留。它们不是任务质量、IVF 或 CXL 性能证据，详见 [RESULTS](docs/RESULTS.md)。
 
 ## 3. 框架与语言选择
@@ -56,7 +73,8 @@
 |---|---|---|---|
 | 模型/session/token | Python + 现有 Transformers/PyTorch adapter | 保留真实 Q/K/V、template 与位置控制，缩短首个正确原型路径 | 扩展 `src/module/` |
 | trace/配置/实验/质量 | Python + NumPy | 易审计、易复现；FP64 仅数学参考 | 扩展 artifacts 与 `scripts/` |
-| index baseline | Faiss CPU Python API + C++ 内核 | 可控 IP、Flat/SQ/PQ 对照；先分清算法与 lifecycle | 后续 `src/index/` |
+| 主 IVF 候选 | HAKES-Index 的 C++17 filter library + pybind11，释放 GIL | 直接研究分区读写并发；外部 canonical K 精排，避免全量 refine copy | `src/index/`，native adapter 尚未写 |
+| index 控制 / 维护对照 | Faiss CPU 串行控制 / Quake 独立 C++ 环境 | exact/朴素 append 对照与 adaptive split/merge 分开比较 | `index/faiss.py` 与通用 interfaces/backends；Quake 未接入 |
 | KV arena/NUMA/leases | C++17 + pybind11 + libnuma | 显式 allocation、页驻留、owner、完成事件与并发边界 | 后续 `src/storage/` |
 | manifest/slots/log | C++17，先短锁和单 writer | 先获得安全发布与回收，避免无锁协议成为首轮依赖 | `src/index/` native 部分 |
 | K 精排/CPU partial | 先 NumPy 控制；性能阶段 C++/BLAS，再 SIMD | 参考正确性和优化性能分开；逐候选 Python 循环不进入性能路径 | 后续 `src/retrieval/`、`src/execution/` |
@@ -67,7 +85,8 @@ Python/C++ 边界采用批量 descriptor/数组和显式 handle，native 长任�
 
 先不迁移到 vLLM/SGLang。全模型持续 session 和数据路径稳定后，只选一个 serving 接入；用实现侵入程度、extend/decode、KV ownership、维护事件集成来选。相关参考：[HF cache](https://huggingface.co/docs/transformers/v4.57.1/en/cache_explanation)、[vLLM prefix cache](https://docs.vllm.ai/en/latest/design/prefix_caching/)、[SGLang attention backend](https://docs.sglang.io/docs/advanced_features/attention_backend)。
 
-新目录只在对应组件实际实现时增加，不创建空 scaffold。本轮不调整现有 `src/` 布局。
+新目录只在组件有实质源码时增加：本轮新增 `infra/`、`index/faiss.py`、`storage/` 和 root CMake，
+保留 `module/`；不增加空 scaffold、`__init__.py` 或 `__main__.py`。其它 native/GPU kernel 后置。
 
 ## 4. 统一 CPU/DRAM 层与 CXL 层
 
@@ -157,23 +176,61 @@ CPU/GPU partial 的语义分区与物理 NUMA node 解耦。每 head 选集按 t
 
 | 对象 | 优先级/用途 | 接入边界 |
 |---|---|---|
-| Faiss CPU FlatIP/IVF-Flat | 首轮控制与索引载体 | IP、训练、add、scan；写操作外部同步。标准版本保存 FP32 vectors，并非 ID-only |
+| HAKES-Index（PVLDB 2025） | **首选 CPU 并发 IVF 接入候选，进入 P2 首轮** | 只接 C++ filter library；分区共享/独占锁、PQ4 FastScan；精排读取我方 canonical K；不引入其 RPC/分布式 serving |
+| Faiss CPU FlatIP/IVF-Flat | exact 与串行控制，非目标并发后端 | IP、训练、add、scan；外部锁。当前 adapter 连 search/search 也串行；标准版本保存 FP32 vectors，并非 ID-only |
 | 自管 ID-only IVF | P2 后半至 P3 的受控实现 | 复用 coarse training/assignment，lists 只存稳定 ID；扫描 canonical K，单独测随机 gather |
 | Faiss IVF-SQ8/PQ | 压缩候选对照 | 编码/扫描产生候选，再 canonical K exact refine |
-| HAKES-Index | CPU 并发读写强基线 | 只接 index library；记录压缩训练、原向量副本、locks 与 visibility |
-| Quake | 动态维护强基线 | local split/merge、维护策略；论文当前实现串行 search/update/maintenance |
+| Quake（OSDI 2025） | 同阶段的动态维护强基线 | local split/merge、adaptive probing、NUMA scan；论文 §8.2 说明 search/update/maintenance 串行，不能当作现成并发实现 |
 | cuVS IVF | GPU 构建/查询对照 | `extend` 不自动证明 concurrent extend/search；先 event/串行控制 |
 | RetroInfer | 系统与分段追加基线 | 原生质量 track 与固定 mask/机制消融分开 |
 | SIVF/ElasticIVF | append publication/slab 参考 | 审计版本 L2、MAX_K=32；修补并验证前不列为 attention IP 性能基线 |
 | InSituANN | CPU/GPU 分工、构建参考 | 公开 PQ overlay 不含完整在线插入管线，不当作已具备实时 KV 插入的实现 |
 
-Faiss 原地加锁 append 是朴素 baseline，不是目标并发系统。目标先用 immutable base + bounded exact tail，之后用不可变 delta chunks/受控发布；读取中的 Faiss 对象不被直接修改。长期 append 最终交给明确同步的自管结构或已验证 library。
+目标后端不限定 Faiss。HAKES 优先回答读写并发，Quake 回答 skew/drift 下的局部维护，SIVF
+提供 GPU slab/publication 参考；三者的优势不等于已满足本项目的 attention 可见性、CXL 放置
+或内存边界。HAKES 与 SIVF 都扩展了 Faiss 源码，但不是 PyPI 标准 `faiss-cpu`。
+HAKES 接入遇到公开 artifact 缺陷时保留未修改源码和独立 patch，不退回 Faiss 冒充已接入。
+
+Faiss 原地加锁 append 保留为朴素 baseline；读取中的标准 Faiss 对象不直接修改。
+HAKES 可在同一 generation 内使用经适配的分区同步追加；rebuild/codebook 替换仍由外部
+controller 管理：bounded exact tail、catch-up log、完整 manifest、读者 pin 和退役回收。
+库提供 concurrent add/search 不等于我们的 generation/prefix 协议已经实现。
 
 **选择标准是满足相同质量、query P99、可见性和内存约束后的 session 成本 Pareto 前沿。** 不按最大批量 QPS 单独选择“最好 SOTA”。真正实时更新至少要求：新 KV 对 attention 及时可见；index 尚未 ready 时有精确覆盖；backlog/tail 有界；读者不会看到半初始化条目；退役可收敛。
 
 官方依据：[Faiss FAQ](https://github.com/facebookresearch/faiss/wiki/FAQ)、[索引存储](https://github.com/facebookresearch/faiss/wiki/Faiss-indexes)、[HAKES](https://github.com/nusdbsystem/HAKES-Search)、[Quake §8.2](https://www.usenix.org/system/files/osdi25-mohoney.pdf)、[cuVS](https://docs.nvidia.com/cuvs/api-reference/python-api-neighbors-ivf-flat)、[SIVF 代码](https://github.com/hpdic/ElasticIVF)、[InSituANN 更新范围](https://github.com/mindtravel/InSituANN-OpenSource)。
 
-### 5.2 初筛参数与工作负载
+### 5.2 HAKES 接入顺序与已经发现的边界
+
+1. 固定 `9fbe8b99371c70d854618cff6de60e9986f4bd95`，源包 SHA-256 与用途写入
+   [index_backends.json](configs/index_backends.json)。2026-10-12 的 `ls-remote` 与此一致。
+   原始源码放在忽略的 `artifacts/upstream/`；不覆盖当前 `.venv` 中的 Faiss wheel。
+2. 只构建 `faiss-ex` 的 CPU C++ library，关闭 GPU、Python Faiss 包与上游 tests。
+   再绑定独立命名的本项目 native module，长 train/add/search 释放 GIL；限制编译/运行线程。
+   同进程动态符号和 BLAS/OpenMP 冲突需审计；不能仅给两个 `.so` 改名就宣称隔离。
+3. 优先用 `Initialize(..., mode=1)` 的 filter-only 路径，调用输出 assignment 的
+   `AddWithIds` 重载与 `Search`；K 精排交给稳定 KV owner，V 在逐 head selection 后取得。
+   HAKES 的完整 filter+refine 原生模式作为独立对照，额外 FP32 K/mapping 逐项计费。
+4. 首轮 d=128、PQ4、M=32、禁用降维和在线 learned-query 参数替换。它是 **HAKES 并发
+   filter 适配路径**，不冒充论文所有优化已复现。后续 learned training 只使用已经出现的 Q/K，
+   记录训练水位、查询样本和时间，禁止未来 decode Q。
+5. native scan 在候选进入 heap **之前**检查 row ID `< visible_hi`、当前空间/epoch 与 ready
+   状态；事后删除 future candidates 会挤掉合法候选，不能充当等价实现。group snapshot pin、
+   exact tail 和无 hole 的发布水位由我方提供。分区 size/payload 的读锁必须覆盖同一个一致视图。
+6. 替换新 owner，而非在线调用 `UpdateParams`。源码注释已要求该函数与其他操作外部同步；
+   本次静态核对还发现其 `unique_ptr<HakesIndex> loaded` 未构造就传 `loaded.get()`，
+   filter-only 的 `Reserve` 仍直接访问 mapping/refine，降维后的批量 `Search` 仍以输入 d
+   计算 query offset。这些是接入前须修复或明确绕开的源码问题，**没有执行故障复现**。
+7. 先在受限 CPU/DRAM 预算接通；之后给 lists/code/scratch 增加可计费 allocator/容量上限。
+   canonical K/V 才由当前 NUMA arena 放置；不能把 HAKES 默认 host 分配称为 CXL。
+   append 失败不前推 indexed 水位，保留精确 tail；每次 resize/realloc 的临时峰值也计费。
+
+公共协议在 `src/index/interfaces.py`，显式 backend 工厂/只读 inventory 在 `backends.py`。
+`experiment.json` 选 `backend=hakes`，`control=faiss_cpu/ivf_flat`；当前 HAKES 没有 adapter，
+实例化会明确失败，不会自动调用 Faiss。prepare 分别报告所选后端与控制后端的源码/依赖状态；
+`prepared` 仅表示基础资产预检，不表示 HAKES 可运行。
+
+### 5.3 初筛参数与工作负载
 
 | 参数 | 起步范围 | 约束 |
 |---|---|---|
@@ -189,9 +246,13 @@ Faiss 原地加锁 append 是朴素 baseline，不是目标并发系统。目标
 | delta/tail 上限 | 256、1024、4096 tokens 初筛 | 是运行上限，不覆盖需求时回压；prefill burst 分块提交 |
 | compute workers | 1、4、8、16 | 与 NUMA profile 联合，但不首轮全组合 |
 
-先固定 Flat、统一 CPU 池中的少量物理核、一个 k，筛 nlist/nprobe；再加入压缩、维护、层间/层内 placement。每阶段只扩一个主要设计轴。
+先固定统一 CPU 池中的少量物理核、一个 k，以 exact FlatIP 建立质量参照，同时筛
+Faiss 控制与 HAKES 的 nlist/nprobe/candidate 倍数；压缩比较对齐最终 selection 质量。
+补 write ratio=0/0.1/0.5/0.9 的并发控制 workload 和真实 turn burst/decode append；共同报告
+query P99、append-to-searchable 延迟、tail/backlog、build 时间和峰值内存，不能只看总 QPS。
+Quake 维护不与查询并发的原生行为单列。再进入维护、层间/层内 placement，每阶段只扩一个主要轴。
 
-### 5.3 RetroInfer 的具体参考点
+### 5.4 RetroInfer 的具体参考点
 
 本地 [RetroInfer 更新路径](/home/huangyirui/RetrievalAttention/cache_hub/retroinfer_cache.py:595) 已做 1024-token 分段聚类、metadata 扩展和 buffer 更新；[模型 init](/home/huangyirui/RetrievalAttention/model_hub/llama.py:157) 会重新创建 request cache。借鉴逐层 build/offload、scratch 共享、wave buffer 和 CPU/GPU 语言分工。
 
@@ -203,12 +264,13 @@ Faiss 原地加锁 append 是朴素 baseline，不是目标并发系统。目标
 
 1. **Session：** `begin_session → append_turn → generate_turn → end_session`。验证 token prefix，维护 committed/pending token、EOS/template、position；turn 结束不销毁历史。
 2. **KV owner：** 每个空间 `(session, layer, group)` 稳定 row ID，K/V 分离 arena 与目录；KV layout epoch 和 index generation 分开。
-3. **Append：** new KV ready 后取得有界 owner；backing-ready 和 index-ready 分别记录。先初始化 payload/ID/code，再发布；完整水位不跨 hole。
+3. **Append/flush：** new KV ready 后进入完整有界 delta；backing-ready 和 index-ready 分别记录。轮内按批量/周期沿用活动参数 assignment/encoding，先初始化并发布条目，再整体推进 indexed prefix/delta，旧 delta 读者结束后回收；完整水位不跨 hole。
 4. **Read：** 短锁内安全 pin manifest；按本层 query position 限制可见范围。ANN base/delta 加完整 exact tail，逐 head 去重。
 5. **Refine：** candidate union 仅合并物理 K 读取；各 head 精确 QK/top-k，保留 selected K lease/真 logits；确定选集后再取 V。
-6. **Replace：** builder 取得 build 水位，扫描 canonical K；新增写入进入有界 log。若换 codebook，用新参数重编码 catch-up 数据。
-7. **Publish：** 在有界 commit gate 内追赶至明确水位，整体发布 codebook/base/delta/tail/watermarks/epoch；新读者 pin 新版本，旧读者保留原视图。
-8. **Retire：** 等 CPU readers、GPU kernels、DMA、cache install、builder leases 完成后复用槽位，更新 generation 防 ABA。失败 build 保留原 active；失败代价仍计量。
+6. **Replace：** 只在下一轮 prefill 开始进行全轮 rebuild admission，逐层/group 的任务在该 prefill 阶段调度；builder 扫描已有 canonical K，本次 prefill 新写入记有界 log。若换 codebook，用新参数重编码 catch-up 数据。历史模型前向不因建索引重跑。
+7. **Publish：** 初版在 prefill→decode 边界的有界 commit gate 内追赶至明确水位，整体发布 codebook/base/delta/tail/watermarks/epoch，再进入 decode；构建等待计入 TTFT。开始时没有预算则跳过本次重建。
+8. **Retire：** 索引等实际借用旧版本的任务结束后复用；KV/cache/staging 等各自 CPU/GPU/DMA completion，更新 generation 防 ABA。失败 build 取消 B、保留完整 active + delta；退役回收可延后，full rebuild 不跨入 decode。
+9. **Partial：** pin ready GPU 热 KV（含新生成尚未下放部分），按各 head S_h 分为 GPU resident 与 CPU history 两个互斥集合；CPU 复用精排 K/logits，选集确定后取 V，返回 normalized output + natural-log LSE，在 GPU 侧和热区 partial 合并。同一缓存 ID 留在 IVF 不等于可在两路重复贡献。
 
 起点单 writer、一个后台 builder、显式 handles。每层/group 的 active index 全部保留；全局 credits 限制额外 building/retired bytes，首轮只允许一个 group 的额外替换任务。scratch 跨层复用；不能默认每层有一份完整双缓冲。
 
@@ -261,7 +323,7 @@ canonical K/V + active index + building/retired index
 | Track | 用途 | 起步内容 |
 |---|---|---|
 | 可控 vector/event stream | 1M 生命周期、skew、更新/查询并发、内存压力 | 稳定、topic switch/return、长 turn burst；标为 synthetic |
-| 真实因果 Q/K/V replay | 隔离 IVF、维护、NUMA、execution | 3B 8K/32K，单 group→单层；固定相同输入/选集 |
+| 真实因果 Q/K/V replay | 隔离 IVF、维护、NUMA、execution | 8B 8K/32K，单 group→单层；固定相同输入/选集 |
 | 模型多轮 free generation | 任务质量、误差累积、TTFT/ITL | RULER 派生分轮注入、LoCoMo 多轮；与官方终点 track 分开 |
 
 新增 session event trace 保存 append chunks、Q records、token/position、layer/group、版本/水位、arrival/turn boundary 和事件顺序；不能每个 decode step 重存完整历史 K/V。保留现有 Trace v1 作为单 step 检查输入。capture/写盘成本单列，性能 replay 从明确 placement 的内存输入运行。
@@ -273,15 +335,19 @@ canonical K/V + active index + building/retired index
 | 对象 | 用途与进入条件 |
 |---|---|
 | 固定 revision SmolLM2-135M | session/接口/数值控制；8192 position limit，d=64 |
-| Llama-3.2-3B-Instruct | 首个研究模型，d=128、GQA、128K 配置；先 8K/32K |
-| Llama-3.1-8B-Instruct | 后续强质量参照；先核实下载、许可、配置与容量 |
+| Llama-3.1-8B-Instruct | 主模型，32 层/8 KV heads/d=128；本地下载和完整性校验完成，先 8K，再 32K；尚未推理验证 |
+| Llama-3.2-3B-Instruct | 可选低成本控制，不再要求作为首个研究模型 |
 | NVIDIA UltraLong 1M checkpoint | 后期候选；EOS/vocab/template/RoPE、checkpoint dtype 与长 prefill 先验证 |
 | RULER | multi-needle、tracking、aggregation；先 4K/8K/32K，每配置约 20 条 pilot，再扩独立 seed/样本 |
 | LoCoMo | 先官方终点文本 QA，再独立派生 streaming replay；仅 10 conversations，按对话聚类报告 |
 | LongMemEval | 后续长记忆/知识更新/时间推理；官方远程 judge 与本地替代评分分开 |
 | LongBench/InfiniteBench/BABILong | 形成主线后补充覆盖，不首轮同时调参 |
 
-NFS 个人目录 `data/models` 当前为空，`data/benchmarks` 有 RULER 目录，完整性待核对。归档路径沿用 `/mnt/nfs/home/huangyirui/data/{models,benchmarks}`，下载大文件优先实验室 HF mirror/ModelScope，记录实际 revision/hash；模型本地运行。公开重打包必须独立记录来源和许可，不假定与 Meta 原仓字节一致。
+NFS `data/models/Llama-3.1-8B-Instruct` 已下载，Meta/ModelScope 固定 revisions 与匹配记录在模型目录。
+`data/benchmarks/RULER` 当前是 commit `e8bbff677ca2c239640dc90f93310dcf32408c93` 的 NeMo-Skills
+入口源码，不是生成数据。生成器用独立环境，导出 JSONL 交给我方 adapter；本轮未安装 NeMo、
+生成任务或评测。归档仍为 `/mnt/nfs/home/huangyirui/data/{models,benchmarks}`，下载优先 HF mirror/
+ModelScope，记录 revision/hash；公开重打包须核对来源、许可与原仓匹配。
 
 官方终点 QA 与派生 streaming 追问独立运行：仅在证据已经出现时提问，新增追问会改变后续上下文。teacher-forced 原对话 replay 与 free generation 分支分别报告。原官方评分若使用远程 API，本地 judge 结果明确标为替代协议。
 
@@ -292,9 +358,9 @@ NFS 个人目录 `data/models` 当前为空，`data/benchmarks` 有 RULER 目录
 | 轴 | 必须比较 | 固定条件 |
 |---|---|---|
 | 选择/质量 | dense、exact top-k、IVF-Flat、SQ/PQ+exact refine | 模型、dtype、mandatory policy、逐 head budget |
-| 索引/维护 | exact FlatIP；Faiss lock append；never rebuild；每 turn rebuild；固定阈值 compact/retrain；后台替换；再 HAKES/Quake | 因果 stream、质量、CPU cores、内存预算 |
+| 索引/维护 | exact FlatIP；Faiss lock append；HAKES 并发 filter；Quake 维护对照；never rebuild / 每轮 prefill 开始 rebuild / 选择部分 prefill 开始 rebuild；独立扫描轮内 delta flush 批量/周期 | 因果 stream、最终质量、CPU cores、内存预算；原生与边界适配模式分列 |
 | memory management | new allocation vs slot reuse；logical reset vs clear；统一 CPU 池的维护并发与 locality；逐 group vs 逐层 | 复制/旧版本/失败均计费 |
-| attention execution | FlashInfer GPU packet；优化 CPU；固定 hot/history；再 logits+V | 冻结同一逐 head CSR 与 dtype |
+| attention execution | GPU hot + CPU history partial 主路径；GPU packet / CPU whole-group 控制；prefix/热缓存预算；再 logits+V | 冻结同一逐 head CSR 与 dtype；promotion、状态传输和 merge 全计费 |
 | 层次与 NUMA | T0/T1 先比较；T2 待 node 2 online；之后 T3/T4/T5/T6 | 等核数、等容量先测；扩资源结果单列 |
 | 系统 | RetroInfer 原生 quality/E2E；对齐语义的机制消融 | 记录原生近似机制、更新触发和 CUDA Graph 状态 |
 
@@ -304,9 +370,10 @@ NFS 个人目录 `data/models` 当前为空，`data/benchmarks` 有 RULER 目录
 
 | 优先级 | 候选 | 具体节省 | 进入条件 |
 |---|---|---|---|
-| 先复用 | FlashInfer attention/merge、cuBLAS、Faiss scan/training | 获得成熟控制 | 确认 SM80、dtype、mask 与 LSE 契约 |
+| 先复用 | FlashInfer attention/merge、cuBLAS、HAKES FastScan/编码、Faiss 控制 training/scan | 获得成熟组件与可比控制 | 确认 SM80、dtype、visibility、mask 与 LSE 契约 |
+| 高 | CPU 历史 partial 的 stable softmax/PV | 冷 KV 全部送 GPU 的搬运；与 GPU 热区协作 | 先用 NumPy 数值控制接通主流程，再按实际 profile 选择 C++/SIMD/BLAS |
 | 高 | CPU span gather + exact refine/top-k | 随机读放大、重复 K 读取、Python 开销 | 测得 gather/refine 主导；C++ 控制后再 SIMD |
-| 高 | GPU logits+V stable softmax/PV | K 再上传、QK 再算 | 真实 logits identity 一致；净省完整路径时间 |
+| 后续对照 | GPU logits+V stable softmax/PV | CPU 冷历史改走 GPU 时避免 K 上传与 QK 再算 | 主 CPU partial 路径已有 K 复用；仅在该对照净省完整时间且 logits identity 一致时投入 |
 | 中 | masked GQA shared-KV tile | 多 head 重复 KV 加载/launch | 原有独立逻辑行的冗余确为热点 |
 | 中 | 批量 assignment/encoding/append | turn burst/build 开销 | microbatch+tail 后仍有必要；不恶化 decode P99 |
 | 后置 | fused IVF probe/scan/top-k | compressed scan 与中间 materialization | 排除 K gather/传输主导；避免重写全套 ANN GPU engine |
@@ -317,33 +384,37 @@ NFS 个人目录 `data/models` 当前为空，`data/benchmarks` 有 RULER 目录
 
 ## 10. 工作包与拟议验收
 
-以下验收是在后续实施与验证时执行的条件，本轮不添加或运行代码测试。
+以下验收是在后续获得实施验证授权时执行的条件；本轮安装/构建/只读准备没有添加或运行代码测试。
 
 | 工作包 | 依赖 | 具体交付 | 拟议进入/退出条件 |
 |---|---|---|---|
 | P0：资源与可复现起点 | 无 | topology、依赖/源码锁定、resource budget、NUMA 校准方案 | CXL 映射/residency 方法明确；无资源窗口则仅进行 CPU 文档/代码工作 |
 | P1：persistent session | P0 环境 | session API、增量 turn、pending token、full 控制与因果 trace | 与重算 full 控制在登记容差内一致；历史保留、position/template 无漏重 |
-| P2：单 group IVF | P1；可控 stream 可提前做控制原型 | FlatIP/IVF-Flat、ID-only、exact tail、质量曲线 | 满足逐 head visibility；真实小批在可接受质量下有成本空间 |
-| P3：有界替换与层次协同 | P2 | log/catch-up/manifest/retire、CPU/CXL pools、T0/T1/T4；T2 条件具备后加入 | 无 future/半条目/提前回收；tail/log/版本有界；长期替换可收敛 |
-| P4：partial 与执行热点 | P3；与质量预算协调 | K/logits handoff、CPU/GPU 控制、T3/T5/T6 条件探索 | 同 mask 不重不漏；完整路径归因；确定必要 native/kernel 工作 |
+| P2：单 group IVF | P1；可控 stream 可提前做控制原型 | HAKES 并发 adapter、FlatIP/串行 IVF 控制、完整 delta/tail 与定期 flush、Quake 对照 | 满足逐 head visibility；固定参数批量插入在相同质量/内存下有成本空间 |
+| P3：有界替换与层次协同 | P2 | prefill 开始准入、逐层 build/log/catch-up、进入 decode 前 publish、retire；CPU/CXL pools | 无 future/半条目/提前回收；tail/log/版本有界；TTFT/历史扫描与替换可收敛 |
+| P4：两路 partial 与执行热点 | P2/稳定 KV lease；可与 P3 并行实施 | GPU prefix/热缓存 + CPU 历史 partial、LSE merge、K/logits handoff；whole-group/packet 控制 | 同 mask 不重不漏；完整路径归因；确定必要 native/kernel 工作 |
 | P5：整层/全模型质量与 CXL | P2–P4 适用部分 | RULER/LoCoMo、RetroInfer、任务质量、实际 placement/E2E | dense/exact-topk 先满足质量；区分真实长 prefill 能力与索引规模 |
 | P6：优化与 serving 扩展 | P4/P5 有净空间 | 必要 kernels；一个 serving 接入候选 | 同语义、同资源下的重复实验净收益；否则保留成熟路径 |
 
 第一批实施任务：
 
-- [ ] P0-1 固定 baseline checkout、依赖候选与构建配置，先不升级现有 `.venv`。
+- [x] P0-1 锁定 Faiss CPU/pybind11 与 native 构建配置，旧推理依赖不升级；记录本地 baseline checkout，未安装/复现上游。
+- [x] P0-4 基础统一配置、reservation、worker affinity、NUMA extent 源码/编译、独立 Faiss API、journal 与只读 prepare；运行时验收待执行。
+- [x] P0-5 修正 IVF 选型，HAKES 首选/Faiss 控制/Quake 维护/SIVF 参考；锁定与静态审计 HAKES，建立不依赖 Faiss 的接口、显式选型和依赖 inventory；native lock 与 Faiss control lock 分离。
 - [ ] P0-2 与 owner 协调每个 job 的 CPU、各 node 内存、HBM、pinned memory 和运行窗口。
 - [ ] P0-3 向运维核对 node 2 缺席及 CXL 映射/counters；记录 configured={2,3}、observed={3}，实现前明确 residency 方法。
 - [ ] P1-1 扩展 generation/cache 为持续 session，保存 committed/pending token、template hash 与 position。
 - [ ] P1-2 定义 append/Q/lifecycle event trace，保留现有 Trace v1。
 - [ ] P1-3 后续验证短上下文 full session 与重算控制，保留所有失败。
-- [ ] P2-1 接入 FlatIP/IVF-Flat IP，外部写锁；先一个 layer/group。
-- [ ] P2-2 实现完整 exact tail 与逐 head 去重，导出候选、精排、copy/timing 分项。
-- [ ] P2-3 获得真实 3B 小批 Q/K trace，粗筛 nlist/nprobe；确认是否需要压缩。
+- [ ] P2-1 构建 HAKES CPU library 和独立 native adapter，落实上述源码修补、filter-only、GIL/并发/allocator 边界；先一个 layer/group。
+- [ ] P2-2 完成 query prefix predicate、完整 delta/exact tail 与逐 head 去重、定期 flush；条目可见后才推进 delta，旧引用结束再回收；接通 FlatIP/IVF-Flat 控制。
+- [ ] P2-3 获得真实 8B 小批 Q/K trace，同质量/核数/预算比较 HAKES 与 Faiss；补并发/turn burst、更新可见延迟与峰值内存。
+- [ ] P2-4 接入 Quake 自适应维护对照；有界替换与长期 skew/drift workload 接入 P3，SIVF 维持后置 GPU 参考。
 - [ ] P3-1 建立 CPU/DRAM={0,1}、CXL={2,3} 的逻辑 allocator，K/V 独立 arena、稳定 ID、page residency、批量 lease；节点可用性显式校验。
-- [ ] P3-2 实现有界日志、单额外版本、catch-up、整体 publish、真实 retire。
+- [ ] P3-2 实现下一轮 prefill 开始准入、有界日志、单额外版本、catch-up、进入 decode 前整体 publish 和真实 retire；分别计 TTFT、等待与回收。
 - [ ] P3-3 在统一 CPU 池、相同总核数/预算下比较 DRAM 与 CXL backing、维护 credits/并发；再作层内 locality 消融。
-- [ ] P3-4 运行批准规模的 64K→256K→1M stream；无界 backlog 或资源超限即停止扩长。
+- [ ] P3-4 运行批准规模的 64K→256K→1M stream；加入已建立 100K 历史→轮内 flush→下一轮 prefill rebuild 的因果轨迹；无界 backlog 或资源超限即停止扩长。
+- [ ] P4-1 接通有限 prefix/热 KV lease、逐 head GPU/CPU 分区和两路 output/LSE merge；NumPy 控制先明确数值契约，GPU 复用现有 FlashInfer，CPU 优化在热点测量后实施。
 
 工期在 P1/P2 实测开发与运行成本后估算；不能预先将 1M 模型、多个强 baseline 和 native kernels 压进同一个首轮里程碑。
 
@@ -376,8 +447,8 @@ NFS 个人目录 `data/models` 当前为空，`data/benchmarks` 有 RULER 目录
 
 1. **CPU/CXL 层次路径矩阵：** CPU workers 0/1 × DRAM backing 0/1、CXL backing 2/3 的 scan/gather/append；当前 node 2 标缺测；单/双 CXL 节点与 staging/H2D 对照。
 2. **IVF 质量—成本曲线：** 真实小批 query latency、候选/scan bytes、recall/mass/output error，Flat/SQ/PQ 分开。
-3. **多轮维护时间线：** 每 turn query/append、build/catch-up/publish/drain、tail/backlog、active/building/retired peak，new allocation/slot reuse 对照。
-4. **固定选集执行分解：** refine、V fetch、pack/H2D、plan/run、merge/join；whole-group 与 K/logits handoff。
+3. **多轮维护时间线：** 已有约 100K 历史、本轮 query/delta flush、下一轮 prefill 开始的 build/catch-up/publish、decode 后的 reader drain；TTFT、重叠/等待、peak 与 slot reuse 对照。
+4. **固定选集执行分解：** refine、V fetch、GPU 热区/CPU 历史 partial、状态回传、merge/join、缓存安装；whole-group/packet 与 K/logits handoff 对照。
 5. **任务与系统结果：** 逐 turn 质量、TTFT/ITL 分布与 session 总成本；synthetic/replay/真实模型分面，不混成一条性能曲线。
 
 ## 12. 版本与交付纪律

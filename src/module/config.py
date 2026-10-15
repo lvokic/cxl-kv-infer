@@ -28,6 +28,7 @@ class InferenceConfig:
     cache_dir: str = "data/models"
     local_files_only: bool = False
     gpu_memory_fraction: float = 0.5
+    cpu_threads: int | None = None
 
     def validate(self):
         if not self.model:
@@ -67,6 +68,8 @@ class InferenceConfig:
             raise ValueError("capture_step must be reached by a decode forward; increase max_new_tokens")
         if not 0 < self.gpu_memory_fraction <= 1:
             raise ValueError("gpu_memory_fraction must be in (0,1]")
+        if self.cpu_threads is not None and (type(self.cpu_threads) is not int or self.cpu_threads < 1):
+            raise ValueError("cpu_threads must be a positive integer when specified")
         for indices in (self.layers, self.groups):
             if indices is not None and (not indices or min(indices) < 0 or len(set(indices)) != len(indices)):
                 raise ValueError("layers/groups must contain unique nonnegative IDs, or all")

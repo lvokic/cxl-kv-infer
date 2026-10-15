@@ -2,9 +2,18 @@
 
 面向持续多轮、超长上下文 KV 的 IVF 向量检索与 partial attention，探索 GPU / DRAM / CXL 上的更新、维护和执行成本。
 
-**起始点：persistent session trace → 单个 KV group → 单层 → 模型 decode。** 先实现跨 turn KV 保留和 IVF-Flat snapshot + delta 的正确性，再研究 compaction/rebuild 与 partial attention；随后扩到 NUMA DRAM 和 memory-only CXL。
+**起始点：persistent session trace → 单个 KV group → 单层 → 模型 decode。** 先实现跨 turn KV 保留、IVF 可见性与 exact tail，再研究 compaction/rebuild 与 partial attention；随后扩到 NUMA DRAM 和 memory-only CXL。
 
 ## 交付状态
+
+2026-10-12：技术选型和基础 infra 已落地，见 [开发与运行](docs/DEVELOPMENT.md)。
+本地 Llama-3.1-8B-Instruct 为主模型；安装了锁定 Faiss CPU/pybind11，编译了 C++17/libnuma
+arena 桥接层，执行了不加载模型的只读预检。新增统一配置、资源 reservation、逐 worker affinity、
+独立 FlatIP/IVF-Flat API 与增量 event journal。尚未执行这些新接口的数值、驻留或性能验证。
+
+IVF 选型已按并发更新需求调整：**HAKES-Index 为 CPU 并发候选，Faiss 为串行控制，Quake
+为动态维护对照**。公共接口和配置解除 Faiss 绑定，native/Faiss 依赖分开；HAKES 锁定源码
+已下载并静态核对，adapter 尚未实现，没有构建或性能结果。具体接入边界见 [plan §5](plan.md#5-ivf-与相关系统的选型)。
 
 2026-09-29：完整模型入口已就绪，合成与真实模型数值结果均有保留。SmolLM2-135M 的 FP16 检查 20/20、FP32 控制 18/18 通过；BF16 有 4 项严格 logits 对照失败。暂未进行任务质量评估或 CXL 性能 benchmark，见 [RESULTS.md](docs/RESULTS.md)。
 
@@ -18,7 +27,19 @@
 | full / exact-topk 与真实 capture | 保留逐 head mask；真实 post-RoPE trace 可交给原有 replay；完整 KV 仍驻留模型设备 |
 | 硬件快照脚本 | 已执行，只读；不启动 benchmark、不调整 NUMA 策略 |
 
-NUMA/CXL allocator、Faiss selector、KLease 生命周期、优化 CPU kernel、`logits + V` GPU kernel、性能计量框架和在线 planner 都是后续任务。NPZ load 不会把数据放到 CXL，平台 JSON 也不自动控制分配。
+基础 NUMA allocator 已提供源码和编译产物，Faiss 目前是独立 index baseline，尚未接入模型 selector。
+统一配置优先选择 HAKES；目标后端尚未接入时会明确拒绝实例化，不会自动替换成 Faiss。
+持续 session、CXL KV offload、异步 KLease、index replacement、优化 CPU/GPU kernel 和在线 planner
+仍为后续任务。NPZ load 不会把数据放到 CXL，普通 Transformers KV 仍在模型设备上。
+
+基础 infra 的只读入口：
+
+```bash
+bash scripts/with-env.sh --cpu cxl-kv-infra prepare --config configs/experiment.json
+```
+
+每次生成新的 `runs/infra-*`。统一配置及 `dram` / `cxl3_only` / `cxl_dual` profiles 在
+[experiment.json](configs/experiment.json)；配置限额不是已预约的资源，`prepare` 不分配这些池。
 
 ## 运行真实模型
 
@@ -59,6 +80,7 @@ executor 会对选中行重算精确 QK logits，selector 输出会记录 host K
 
 ## 文档
 
+- [项目介绍 HTML](docs/PROJECT_BRIEF.html)：背景与文献、动机对应设计、架构图、技术选型和预期效果；可离线阅读与演示。
 - [具体探索与 NUMA 实施计划](plan.md)：任务依赖、框架/语言选型、统一 CPU/DRAM 层与 CXL 层协同、benchmark/baseline 与拟议验收。
 - [交付状态](docs/HANDOFF.md)
 - [中文研究提案](docs/PROPOSAL.md)：多轮 IVF、索引替换、效率/有效性/内存管理与实验设计。

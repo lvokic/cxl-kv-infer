@@ -27,20 +27,26 @@ def write_json(path, data):
 
 
 def source_manifest():
-    files = list((ROOT / "src").rglob("*.py"))
-    files += list((ROOT / "requirements").glob("*.lock"))
-    files += list((ROOT / "scripts").glob("*.py"))
-    files += [ROOT / "scripts/with-env.sh", ROOT / "pyproject.toml"]
+    files = [p for p in (ROOT / "src").rglob("*") if p.is_file() and
+             p.suffix in (".py", ".cpp", ".h", ".hpp", ".cu", ".cuh")]
+    files += [p for p in (ROOT / "requirements").iterdir() if p.suffix in (".in", ".lock")]
+    files += [p for p in (ROOT / "scripts").iterdir() if p.suffix in (".py", ".sh")]
+    files += [p for p in (ROOT / "configs").iterdir() if p.suffix in (".json", ".jsonl")]
+    files += [ROOT / "pyproject.toml", ROOT / "CMakeLists.txt"]
     return {
         "recorded_utc": datetime.now(timezone.utc).isoformat(),
         "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "git_status": subprocess.check_output(["git", "status", "--short"], cwd=ROOT, text=True),
         "source_sha256": {str(p.relative_to(ROOT)): digest(p) for p in sorted(files)},
+        "native_binary_sha256": {str(p.relative_to(ROOT)): digest(p)
+                                  for p in (ROOT / "src").rglob("*.so")},
         "packages": {d.metadata["Name"]: d.version for d in importlib.metadata.distributions()},
         "launch_environment": {key: os.environ.get(key) for key in (
             "CUDA_VISIBLE_DEVICES", "CUDA_HOME", "CUDACXX", "TORCH_CUDA_ARCH_LIST",
             "FLASHINFER_CUDA_ARCH_LIST", "MAX_JOBS", "OMP_NUM_THREADS",
-            "OPENBLAS_NUM_THREADS", "LIBRARY_PATH", "LD_LIBRARY_PATH")},
+            "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_DYNAMIC", "NUMEXPR_NUM_THREADS",
+            "TOKENIZERS_PARALLELISM", "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE",
+            "LIBRARY_PATH", "LD_LIBRARY_PATH")},
     }
 
 

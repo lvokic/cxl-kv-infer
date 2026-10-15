@@ -8,6 +8,10 @@ from pathlib import Path
 import platform
 import shutil
 import subprocess
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+from infra.topology import Topology
 
 
 def command(argv: list[str]) -> dict:
@@ -31,13 +35,23 @@ def main() -> None:
         "recorded_utc": datetime.now(timezone.utc).isoformat(),
         "kernel": platform.release(), "python": platform.python_version(),
         "gpu_bdf": args.gpu_bdf,
+        "numa": Topology().snapshot(),
+        "kernel_policy": {
+            name: Path(path).read_text().strip() if Path(path).exists() else None
+            for name, path in {
+                "numa_balancing": "/proc/sys/kernel/numa_balancing",
+                "perf_event_paranoid": "/proc/sys/kernel/perf_event_paranoid",
+                "transparent_hugepage": "/sys/kernel/mm/transparent_hugepage/enabled",
+            }.items()
+        },
         "pci_sysfs": {
             name: (pci / name).read_text().strip() if (pci / name).exists() else None
             for name in ("numa_node", "current_link_speed", "current_link_width")
         },
         "commands": [command(argv) for argv in (
             ["lscpu"], ["numactl", "--hardware"],
-            ["nvidia-smi", "--query-gpu=name,pci.bus_id,memory.total,memory.used,driver_version", "--format=csv"],
+            ["nvidia-smi", "--query-gpu=name,pci.bus_id,memory.total,memory.used,utilization.gpu,driver_version", "--format=csv"],
+            ["nvidia-smi", "--query-compute-apps=pid,used_gpu_memory", "--format=csv"],
             ["nvidia-smi", "topo", "-m"], ["nvcc", "--version"],
         )],
     }

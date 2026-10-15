@@ -1,0 +1,4 @@
+# Optional stock-Faiss control baseline; not the primary concurrent IVF backend.
+# Constrain existing packages to the recorded inference environment.
+-c inference-cu130.lock
+faiss-cpu==1.15.1

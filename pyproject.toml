@@ -11,17 +11,19 @@ dependencies = ["numpy>=1.26,<3"]
 
 [project.optional-dependencies]
 gpu = ["torch", "flashinfer-python"]
-ann = ["faiss-cpu"]
+ann = ["faiss-cpu==1.15.1"]
+native = ["pybind11==3.1.0"]
 inference = ["torch", "transformers==4.57.6"]
 
 [project.scripts]
 cxl-kv-replay = "cli:main"
 cxl-kv-infer = "module.cli:main"
+cxl-kv-infra = "infra.cli:main"
 
 [tool.setuptools]
 py-modules = ["cli", "kv_trace", "reference"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["backends*", "module*"]
+include = ["backends*", "module*", "infra*", "index*", "storage*"]
 namespaces = true

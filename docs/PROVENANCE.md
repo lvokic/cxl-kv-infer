@@ -1,6 +1,70 @@
 # 研究依据与输入版本
 
-更新：2026-09-30。来源用于核对设计和代码边界，不构成此仓库的性能证据。
+更新：2026-10-12。来源用于核对设计和代码边界，不构成此仓库的性能证据。
+
+## 2026-10-12 IVF 选型修订与静态源码核对
+
+owner 要求主研究后端不限于 Faiss，优先考虑真实更新/查询并发。相邻 wiki 的
+[并发 IVF 分析](../../kvcache-wiki/wiki/analysis/concurrent-ivf-read-write.md)、
+[HAKES](../../kvcache-wiki/wiki/sources/hakes.md) 和
+[SIVF](../../kvcache-wiki/wiki/sources/sivf.md) 作为只读输入，本次没有修改 wiki。
+
+- 查阅官方 [Faiss FAQ](https://github.com/facebookresearch/faiss/wiki/FAQ)、
+  [HAKES 论文](https://www.vldb.org/pvldb/vol18/p3049-ooi.pdf)/
+  [源码](https://github.com/nusdbsystem/HAKES-Search)、
+  [Quake 论文 §8.2](https://www.usenix.org/system/files/osdi25-mohoney.pdf)/
+  [官方开发指南](https://marius-project.org/quake/development_guide)、
+  [SIVF v3](https://arxiv.org/abs/2601.11808v3)/[源码](https://github.com/hpdic/ElasticIVF)。
+  优先接入 HAKES CPU concurrent filter；Faiss 只保留串行控制；Quake 单列动态维护。
+- `git ls-remote ... HEAD` 实际观察：HAKES
+  `9fbe8b99371c70d854618cff6de60e9986f4bd95`；Quake
+  `0651c88c5c71343191ef06ee4ed292cb4a01e1aa`；ElasticIVF
+  `c41c59d8f65e7a1eefac4aba500e8b6f17b6f546`。与计划中已有 pin 一致，不用 mutable HEAD 运行。
+- HAKES 源包下载至 `artifacts/upstream/hakes-9fbe8b9.tar.gz`，2,378,560 bytes，SHA-256
+  `8de74f1e40db97ed89b78604d26ceb8f7924eee2e19187fc2540849fc93a7414`；解压原件保留。
+  核对了 HakesIndex、BlockInvertedListsL、IndexIVFFastScanL、index_io_ext、参数生成器与
+  CMake，逐文件 hash 和静态发现保存在 [source-audit.json](../runs/ivf-selection-20261012-followup/source-audit.json)。
+  分区锁、filter-only 与源码缺陷仅为静态发现，没有执行故障复现、构建或并发操作。
+- 修改 `interfaces.py`/`backends.py`、配置/catalog、基础 preflight 的依赖 inventory 和文档。
+  `index_threads` 代替 `faiss_threads`；`requirements/native.lock` 仅锁 pybind11，
+  `ann.lock` 保留 stock-Faiss control。两锁重新解析成功，已有环境未安装/卸载/升级任何包。
+- 本次仅做源码阅读、lock 解析、文档/配置/代码修改与 whitespace diff 检查；
+  **没有执行修改后的 adapter/config/prepare，没有编译 HAKES，没有测试或 benchmark。**
+  旧 infra prepare 产物仍保存原始 Faiss 配置，不应当作当前 HAKES 可运行的证据。
+
+研究源、用途和能力声明见 `configs/index_backends.json`，具体接入问题见
+[plan §5.2](../plan.md#52-hakes-接入顺序与已经发现的边界)。当前 HAKES adapter 未写，
+显式选型只决定接入优先级，不能被报告为已完成 SOTA index 或已测 CXL 系统。
+
+## 2026-10-12 基础 infra
+
+本轮起始 HEAD 为 `487dee387079147ff6ea2803bbe1775e94689973`，工作区 clean。当前实现是
+其上未提交修改；run 的 manifest/source.zip 保存 dirty 源码，含 Python/C++、CMake、
+requirements 和配置，另记录 native binary hash。没有修改相邻 wiki 或既有实验输入/输出。
+
+- 主模型：本地 `/mnt/nfs/home/huangyirui/data/models/Llama-3.1-8B-Instruct`；canonical
+  `meta-llama/Llama-3.1-8B-Instruct@0e9e39f249a16976918f6564b8830bc894c89659`，从
+  ModelScope `LLM-Research/Meta-Llama-3.1-8B-Instruct@359efdbb8af05b788a4ad4185215c6b8caa9052c`
+  下载。2026-10-09 完成逐文件原仓匹配与分片结构检查；本轮仅核对大小、metadata hash 和下载记录。
+- 基础 infra 时新安装：Faiss CPU 1.15.1、pybind11 3.1.0。当时 `requirements/ann.lock` 保存解析版本/哈希，并
+  约束现有 inference lock；旧 NumPy 2.5.3、Torch 2.14.0+cu130、Transformers 4.57.6、
+  FlashInfer 0.7.0 保留。后来拆分 native/control locks，原始锁在原 run/source.zip 可追溯。
+  不是上游 Faiss HEAD 的源码构建，也未将 wheel 版本冒充 Git commit。
+- Native 构建：CMake 3.28.3、G++ 13.3.0、libnuma1/libnuma-dev
+  `2.0.18-1ubuntu0.24.04.1`。C++17 Release，两个编译任务；flags/commands/binary SHA-256 在
+  [构建记录](../runs/native-build-20261012-infra-retry/build.json) 与同目录 compile_commands。
+  [首次失败](../runs/native-build-20261012-infra/build.log) 为 libnuma/Linux 头文件常量冲突，已修复并保留。
+- [最终 DRAM 只读准备](../runs/infra-20261012-dram-final/readiness.json) 和
+  [单 CXL 只读准备](../runs/infra-20261012-cxl3-readiness/readiness.json) 保存 source、dependency、
+  topology、GPU 利用和本地 baseline commits。观察 online nodes 0、1、3；node 2 仍缺席，
+  endpoint/decoder 映射和 counters 留给运维核实。
+- RULER 目录为官方 commit `e8bbff677ca2c239640dc90f93310dcf32408c93`，README 已改用
+  NeMo-Skills 工作流；没有生成任务数据或安装其 serving/generator 依赖。源码及 README hash
+  记录于 run/benchmarks.json。本轮 GitHub API 历史查询返回 403，未据此编造 legacy generator commit。
+
+实际执行仅为 dependency 安装、editable 注册、native 编译与只读预检。没有运行单元/数值/性能
+测试、Faiss train/add/search、NUMA allocation/residency、8B 模型或任务质量评估。候选方法与
+拟议验收见 [DEVELOPMENT.md](DEVELOPMENT.md)，不能以这批源码或编译产物声称 CXL 吞吐/驻留已测。
 
 ## 本地输入
 

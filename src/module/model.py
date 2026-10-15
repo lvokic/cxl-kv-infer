@@ -46,6 +46,8 @@ class TransformersEngine:
 
     def __init__(self, config: InferenceConfig, *, cache_lifecycle=None, executors=None):
         config.validate()
+        if config.cpu_threads is not None:
+            torch.set_num_threads(config.cpu_threads)
         self.config = config
         self.device = torch.device(config.device)
         if self.device.type == "cuda":
@@ -84,6 +86,7 @@ class TransformersEngine:
             "sdpa_flash_enabled": torch.backends.cuda.flash_sdp_enabled(),
             "sdpa_math_enabled": torch.backends.cuda.math_sdp_enabled(),
             "sdpa_mem_efficient_enabled": torch.backends.cuda.mem_efficient_sdp_enabled()}
+        self.model_info["runtime"]["torch_cpu_threads"] = torch.get_num_threads()
         self.tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
         register_attention()
         self.controller = DecodeController(

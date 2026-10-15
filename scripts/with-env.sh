@@ -5,7 +5,7 @@ set -euo pipefail
 
 replay_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ ! -x "$replay_root/.venv/bin/python" ]]; then
-    echo "Missing .venv; follow docs/ENVIRONMENT.md first." >&2
+    echo "Missing .venv; follow docs/DEVELOPMENT.md first." >&2
     exit 1
 fi
 if [[ $# -eq 0 ]]; then
@@ -13,7 +13,20 @@ if [[ $# -eq 0 ]]; then
     exit 2
 fi
 
+replay_mode="cuda"
+if [[ "$1" == "--cpu" || "$1" == "--cuda" ]]; then
+    replay_mode="${1#--}"
+    shift
+    if [[ $# -eq 0 ]]; then
+        echo "Usage: bash scripts/with-env.sh [--cpu|--cuda] COMMAND [ARG ...]" >&2
+        exit 2
+    fi
+fi
+
 source "$replay_root/.venv/bin/activate"
+if [[ "$replay_mode" == "cpu" ]]; then
+    exec "$@"
+fi
 replay_site="$(python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
 if [[ ! -x "$replay_site/nvidia/cu13/bin/nvcc" ]]; then
     echo "Missing local CUDA 13.0 toolchain; install requirements/gpu-cu130.lock." >&2

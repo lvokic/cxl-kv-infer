@@ -1,0 +1,57 @@
+{
+  "model": {
+    "path": "/mnt/nfs/home/huangyirui/data/models/Llama-3.1-8B-Instruct",
+    "revision": "0e9e39f249a16976918f6564b8830bc894c89659",
+    "dtype": "float16",
+    "device": "cuda:0",
+    "backend": "sdpa",
+    "selector": "full",
+    "layers": [0],
+    "groups": [0],
+    "max_input_tokens": 8192,
+    "max_new_tokens": 32,
+    "gpu_memory_fraction": 0.75
+  },
+  "tiers": {"cpu_dram": [0, 1], "cxl": [2, 3]},
+  "workers": {
+    "cpus": [0, 1, 32, 33],
+    "allow_smt": false,
+    "index_threads": 4,
+    "torch_threads": 4,
+    "blas_threads": 1,
+    "builder_concurrency": 1
+  },
+  "resources": {
+    "cpu_dram": 1073741824,
+    "cxl": 268435456,
+    "node:0": 536870912,
+    "node:1": 536870912,
+    "node:3": 268435456,
+    "pinned_host": 67108864,
+    "hbm": 34359738368
+  },
+  "profiles": {
+    "dram": {"backing_tier": "cpu_dram", "backing_nodes": [0, 1], "policy": "extent_round_robin"},
+    "cxl3_only": {"backing_tier": "cxl", "backing_nodes": [3], "policy": "extent_round_robin"},
+    "cxl_dual": {"backing_tier": "cxl", "backing_nodes": [2, 3], "policy": "extent_round_robin"}
+  },
+  "index": {
+    "backend": "hakes", "kind": "ivf_pq_fastscan",
+    "control": {"backend": "faiss_cpu", "kind": "ivf_flat"},
+    "metric": "inner_product", "dimension": 128,
+    "nlist": 256, "nprobe": 16, "seed": 42, "training_iterations": 10,
+    "max_vectors": 65536, "workspace_bytes": 67108864,
+    "candidate_k": 1024, "selected_k": 256,
+    "backend_options": {"pq_m": 32, "pq_bits": 4, "reduced_dimension": 128}
+  },
+  "pools": {
+    "packet_slots": 2, "packet_slot_bytes": 33554432,
+    "candidate_k_bytes": 67108864, "builder_scratch_bytes": 67108864,
+    "tail_tokens": 1024, "append_log_records": 4096,
+    "append_log_bytes": 8388608, "replacement_groups": 1
+  },
+  "benchmarks": {
+    "root": "/mnt/nfs/home/huangyirui/data/benchmarks",
+    "ruler": "/mnt/nfs/home/huangyirui/data/benchmarks/RULER"
+  }
+}

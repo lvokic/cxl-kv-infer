@@ -1,12 +1,16 @@
 # 多轮 IVF 索引生命周期：低成本追加、替换与内存复用
 
-更新：2026-09-30。本文是目标协议与研究假设；持续 session、IVF、版本槽位和 native allocator 尚未实现。研究叙事见 [PROPOSAL.md](PROPOSAL.md)，组件契约见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+更新：2026-10-13。本文是目标协议与研究假设；持续 session、IVF 接入和版本槽位尚未实现。
+基础 native extent 已编译，运行时驻留与回收尚未验证。研究叙事见 [PROPOSAL.md](PROPOSAL.md)，
+组件契约见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
 ## 1. 核心想法与适用范围
 
 在一个持续多轮 session 中，prefill 分批产生新 K/V，decode 逐 token 产生新 K/V。累计 context 的本阶段目标上限约为 1,000,000 tokens；它是研究 workload 的规模，不是所有模型的最大能力。历史 KV 不随 turn 结束清空，向量索引持续追加、复用和维护。
 
-希望把常见路径做成便宜的 append，把昂贵维护移到另一个槽位：当前索引继续服务，新索引在后台建立，准备好后切换活动指针，旧查询完成后回收旧槽位，并在下一次维护时复用。环形槽位管理分配与版本生命周期；发布开销可以与索引大小无关，构建、追赶写入、等待读者和清理的总成本仍需计量。
+本轮可以从已经积累约 100K tokens 的历史 KV 和活动索引 A 开始。轮内产生的新 K 进入有界 delta，查询同时覆盖 A 和完整 delta；delta 定期按 A 的既有参数批量插入 A。**轮内 delta flush 是增量插入，不是重训或全量重建；重建只能在下一轮 prefill 开始时获准并启动。** delta 大小、时间间隔、skew 等轮内统计可以决定插入批量或登记下一轮的重建需求，不能启动本轮 decode 中的全量 rebuild。
+
+下一轮 prefill 开始时，利用已保留的历史 K 在另一槽位建 B，并接收本次 prefill 逐层产生的新 K；历史 KV 不为索引重建重新做模型前向。初版把完成追赶和发布作为该层/group 进入 decode 的条件，赶不上的工作计入本轮 prefill 延长与 TTFT；不以后台重建跨入 decode 掩盖成本。若开始时没有预算/空槽，则跳过本次重建，继续使用 A + delta。环形槽位管理分配与版本生命周期；发布开销可以与索引大小无关，构建、追赶写入、等待读者和清理的总成本仍需计量。
 
 这属于 snapshot/delta、版本发布与内存池机制在 attention workload 上的设计适配，不能仅凭“双缓冲/指针切换”主张新颖性。[HAKES](https://www.vldb.org/pvldb/vol18/p3049-ooi.pdf)、[SIVF](https://arxiv.org/abs/2601.11808) 与 [InSituANN](https://arxiv.org/html/2608.08751v1) 分别提供并发更新、发布安全和替换式维护的参照；wiki 的 [并发 IVF 分析](../../kvcache-wiki/wiki/analysis/concurrent-ivf-read-write.md) 区分它们的硬件边界。
 
@@ -28,7 +32,18 @@ canonical K/V 使用分离的 append-stable backing，通过目录映射 row ID 
 
 ## 3. 追加与未入索引尾部
 
-起点为不可变 IVF base + 可搜索增量区 + 精确 pending tail。增量区内条目使用当前 generation 的 routing/encoding 参数；首批数据不足以训练时先走 exact tail，训练只消费当前已可用 K。
+主路径为活动 IVF + 有界 delta，delta 中尚未发布到 IVF 的合法 K 必须精确扫描。
+主接入候选为 HAKES 的并发 filter：本轮同 generation 的 routing/encoding 参数保持不变，
+lists 可以在分区同步下追加。不可变 base + 独立增量段保留为控制变体，不能把 segment merge
+和换参数的全量 rebuild 混为一次操作。
+这仍是目标适配路径，公开库不自带本项目的 prefix snapshot、bounded tail 或 version retirement。
+首批数据不足以训练时先走 exact tail，训练只消费当前已可用 K；learned-query 参数如需训练，
+只消费已经出现的 Q，不能借用未来 decode Q。
+
+每次查询 pin 完整 manifest 与可见水位，在分区读锁保护的一致 size/codes/IDs 视图上扫描。
+条目必须在进入 candidate heap 之前满足 row ID `< visible_hi` 与 ready/epoch 条件；
+事后删除 future IDs 会影响合法候选的名额，不算等价 snapshot。更新 centroid/codebook 时
+构建新 owner，不能与查询并发修改旧参数。Faiss 控制保持原地串行锁，不解除其同步要求。
 
 追加记录经历“GPU 可用 → 复制中 → backing 可用 → 索引条目初始化完成 → 发布”。先写 payload、ID 和编码，再发布有效标志/已提交长度；未完成条目不可被搜索。多条并行写入时，共同水位只推进完整前缀，不能以最大已完成 ID 代替。
 
@@ -36,18 +51,28 @@ canonical K/V 使用分离的 append-stable backing，通过目录映射 row ID 
 
 pending tail、追加日志和复制队列均有上限。维护或复制跟不上时，暂停准入、限制进一步生成或同步推进，并记录等待；不能丢 KV、提前复用槽位或无限扩大 tail。CXL 尚未 ready 的条目必须保留可读取的 GPU/DRAM 来源，不能释放唯一副本。
 
+delta flush 按批量/时间间隔触发，流程为：pin 要插入的 K → 按 A 参数 assignment/encoding →
+初始化并发布条目 → 整体更新 indexed prefix 与 delta 描述。条目完全可见后，新的查询才可从
+delta 移除相应 ID；旧查询 pin 的 delta 内存等读者结束后回收。切换期间两处同时包含某 ID
+时按 head 去重，不能出现覆盖空洞。本文水位使用半开区间：`[0,indexed_hi)` 已入索引，
+`[indexed_hi,visible_hi)` 为需完整覆盖的 delta/tail。精确 delta 的数据和重建追赶日志是
+不同对象，后者保存 ID/K 引用与顺序，不能代替可读取的 delta K。
+
 ## 4. 替换、追赶与发布
 
-MVP 采用单 writer、一个后台 builder；更新提交与发布由同一短临界区协调，索引长扫描不持有发布锁。
+MVP 采用单 writer、一个 builder；仅在 turn 的 prefill 开始时进行 rebuild admission。
+下面的 build/catch-up/publish 在该 prefill 阶段完成；同 session 的 prefill 与 decode 顺序执行，
+不假设它们同时发生。CPU builder 可以和 GPU 新 suffix 的 prefill 重叠，但实际竞争与等待计时。
+更新提交与发布由同一短临界区协调，索引长扫描不持有发布锁。
 
-1. 取得完整的 build 水位 `b`，pin 对应 canonical K 目录。活动索引 A 继续提供读服务；新写入同时进入有界日志。
-2. 在空闲槽位构建 B，覆盖前缀 `[0,b]`。同 centroid 的 compaction 与重新训练是不同操作；重新训练可能需要 K 扫描、重新 assignment 和编码，全部计成本。
-3. 在锁外反复追赶 `(b,c]` 的新增记录，直到剩余 backlog 小于预设切换预算。若 B 参数改变，不能直接拼接 A 的 residual codes；从原始 K 按 B 参数重新生成条目。
-4. 进入有界提交门，冻结 A 的增量描述，选择完整 cutover 水位 `c`，补完最后一批，建立“B 覆盖至 c + B 的新 tail/delta”这一完整 manifest。期间新产生的 KV 留在受保护的 pending tail，相关等待和精确扫描必须计时。
+1. 下一轮 prefill 开始时取得已有历史的完整 build 水位 `b`，pin 对应 canonical K 目录，包括尚在 delta 的已提交 K。活动索引 A 保留有效；本次 prefill 新产生的 K 同时进入有界日志。
+2. 在空闲槽位构建 B，覆盖前缀 `[0,b)`。同 centroid 的 compaction 与重新训练是不同操作；重新训练可能需要 K 扫描、重新 assignment 和编码，全部计成本。
+3. 在锁外反复追赶 `[b,c)` 的本次 prefill 新增记录，直到剩余 backlog 小于预设切换预算。若 B 参数改变，不能直接拼接 A 的 residual codes；从原始 K 按 B 参数重新生成条目。
+4. 进入有界提交门，停止向 A 追加并冻结其增量描述，选择完整 cutover 水位 `c`，补完最后一批，建立“B 覆盖至 c + B 的新 tail/delta”这一完整 manifest。期间新产生的 KV 留在受保护的 pending tail，相关等待和精确扫描必须计时。
 5. 以 release/acquire 发布 manifest 指针与 generation。发布是一个整体操作，不能分别切换 centroid、postings 和水位。后续查询 pin B，已有查询仍使用 A 和自己的可见上界。
-6. A 进入退役状态；所有读者、CPU task、CUDA kernel、DMA、cache install 和 build lease 完成后，才归还其内存块。构建失败时放弃 B，A 继续服务，失败的时间和内存仍进入记录。
+6. A 进入退役状态；实际借用 A 索引存储的读者/任务完成后，才归还其内存块。独立的 K/V、hot cache、staging 与 partial owner 等各自 CPU/CUDA/DMA/安装事件，不共用索引槽的释放条件。构建失败时放弃 B，保留完整 A + delta，失败的时间和内存仍进入记录。
 
-publication 并不意味着零暂停；应分别报告构建、catch-up、临界区、reader drain、可重新利用时间。若最终追赶无法在预算内收敛，采用显式回压或更细的分区替换。并行多编码 delta 属于后续方案，MVP 不靠它掩盖追赶成本。
+publication 并不意味着零暂停；应分别报告构建、catch-up、临界区、reader drain、可重新利用时间和新轮 TTFT。初版在 prefill→decode 边界等待已获准 B 完成；构建失败则取消 B 并保留完整 A + delta。退役回收可以延后到 decode，但不启动或继续全量建造。若最终追赶无法在预算内收敛，采用显式回压；更细的分区替换、并行多编码 delta 属于后续方案。
 
 ## 5. 索引槽位环与真正可复用的资源
 
@@ -73,13 +98,13 @@ prefill 按 layer 产生 K/V，为逐层 assignment/编码和 scratch 复用提�
 - 紧凑索引：约 `L × G × N × (ID bytes + code bytes)`，另加 centroids、metadata、slab slack、allocator 和 build scratch。
 - 峰值：所有活动索引 + 有界替换索引 + 仍未回收的旧版本 + delta/log/tail + canonical KV + resident 副本 + staging/workspace。
 
-例如 L=32、G=8、d=128、BF16、N=1,000,000，canonical KV 约 122.1 GiB；若每向量存 4-byte ID 与 32-byte code，所有活动索引约 8.58 GiB，一个 layer 的额外索引约 274.7 MiB，均不含额外开销。若采用 Faiss 64-bit ID，要改用 8 bytes；若 IVF-Flat 另存完整 K，复制开销可接近完整 K 的约 61.0 GiB。以上仅为架构示例和容量推算，不是测量结果。
+例如 L=32、G=8、d=128、BF16、N=1,000,000，canonical KV 约 122.1 GiB；若每向量存 4-byte ID 与 32-byte code，所有活动索引约 8.58 GiB，一个 layer 的额外索引约 274.7 MiB，均不含额外开销。64-bit ID 须按 8 bytes 计费；另存 BF16 K 约 61.0 GiB，标准 CPU Faiss 的额外 **FP32 K** 则约 122.1 GiB，另加 IDs/lists/workspace。HAKES filter-only 不启用全量 refine copy，但 codes/metadata/alignment 和临时分配仍须逐项记录。以上仅为架构示例和容量推算，不是测量结果。
 
 32-byte PQ code 不是最优参数承诺；MVP 的 IVF-Flat 可用 ID-only postings 扫 canonical K，随后加入 SQ/PQ。连续 postings/codes 不意味着 canonical K 连续：保持 token-major 稳定 backing 会引入随机 gather。先测按物理地址排序和合并 extent；cluster-major canonical 布局另设消融，不能无成本继承 InSituANN 原向量重排的局部性收益。
 
 ## 7. 维护决策与验证问题
 
-由轻到重比较：保持现状、调整 nprobe/候选量、同 centroid 合并 delta、分区 split/merge、重训 centroid/codebook、全索引替换。Q 分布漂移、K 新增分布和 posting skew 是不同信号；topic switch 不自动意味着必须 rebuild。
+轮内只比较固定参数查询、nprobe/候选量调整与定期 delta flush；换 centroid/codebook、全量重建及需要重组织历史的 split/merge 仅在下一轮 prefill 开始时决定并启动。边界策略比较永不重建、每轮 prefill 开始重建、按过去统计选择部分 turn 重建。Q 分布漂移、K 新增分布和 posting skew 是不同信号；topic switch 不自动意味着必须 rebuild。
 
 成本决策使用已发生的查询、写入、队列和 sampled audit，以及预测的剩余 session 查询量。用未来 Q 或事后最佳策略只构造离线 oracle。在线 exact recall audit 需要读完整 K，其成本必须收费；不能把离线完整 attention mass 当作免费在线触发器。
 

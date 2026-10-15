@@ -45,6 +45,7 @@ def parser():
     p.add_argument("--cache-dir", default="data/models")
     p.add_argument("--local-files-only", action="store_true")
     p.add_argument("--gpu-memory-fraction", type=float, default=0.5)
+    p.add_argument("--cpu-threads", type=int, help="explicit PyTorch CPU thread limit")
     return p
 
 
