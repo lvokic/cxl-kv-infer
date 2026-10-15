@@ -1,6 +1,6 @@
 # 交付状态
 
-更新：2026-10-12。
+更新：2026-10-15。
 
 2026-10-13 文档更正（没有新增执行结果）：owner 明确本轮已有大量历史/活动 IVF，轮内
 只维护 delta 并定期按原参数入索引；全量重建仅在下一轮 prefill 开始启动。目标主路径是
@@ -8,24 +8,30 @@ GPU prefix/热 KV partial + CPU 历史 partial，经 LSE 合并。介绍页仍�
 为主体大图；实现依据同步至 [architecture](ARCHITECTURE.md)、[lifecycle](INDEX_LIFECYCLE.md)、
 [proposal](PROPOSAL.md) 和 [plan](../plan.md)。现有 runner 尚未实现这些新路径。
 
+2026-10-15：HAKES-Search 固定源码已迁入 `third_party/hakes`，配置将它作为当前优先 CPU
+IVF-PQ 源码；独立 SIFT1M CPU build/search/mixed-insert 结果见
+`runs/hakes-sift1m-cpu16-20261015T024344Z/RESULTS.md`。这项实验不是项目 adapter 或模型路径；
+运行时接入仍是 P2 工作。
+
 本轮完成技术选型和基础 infra：主模型调整为本地 Llama-3.1-8B-Instruct，统一
 `configs/experiment.json`；新增 `src/infra/`（配置、reservation、topology/worker affinity、
 增量 journal、prepare/infer 入口）、`src/index/faiss.py`（串行 FlatIP/IVF-Flat 控制）、
 `src/storage/`（C++17/pybind11/libnuma 严格 NUMA extent 和 Python tier adapter）。
 没有新增空目录、`__init__.py` 或 `__main__.py`。
 
-随后根据 owner 对并发 IVF 的要求更正选型：HAKES-Index 优先接入 CPU 并发路径，Faiss
-只保留 exact/串行控制，Quake 用于动态维护对照。下载并静态核对了锁定 HAKES 源码；
-新增通用 `index/interfaces.py`、显式 `backends.py` 和 `configs/index_backends.json`，
-线程参数改为 `index_threads`，native/control 依赖锁分离。HAKES adapter 尚未实现，
-所选后端不能自动降级为 Faiss；新的 prepare 会单列其未接入状态。
+随后根据 owner 对并发 IVF 的要求更正选型：HAKES-Index 是当前优先 CPU IVF-PQ 实现，Faiss
+只保留 exact/串行控制，Quake 用于动态维护对照。锁定 HAKES 源码已迁入 `third_party/hakes`，
+来源和 revision 见其中的 `UPSTREAM.md`；新增通用 `index/interfaces.py`、显式 `backends.py`
+和 `configs/index_backends.json`，线程参数为 `index_threads`，native/control 依赖锁分离。
+HAKES 独立 SIFT1M CPU 构建与探索运行的本机 run report 位于 `runs/hakes-sift1m-cpu16-20261015T024344Z/RESULTS.md`。
+项目 HAKES adapter 尚未实现，模型 runner 还不能调用它；所选后端不会自动降级为 Faiss。
 
 实际执行：在仓库 `.venv` 增加锁定 Faiss CPU 1.15.1 / pybind11 3.1.0，保留既有推理依赖；
 NUMA bridge 编译成功，首次头文件冲突的失败日志保留；`cxl-kv-infra prepare` 只读预检完成。
 记录见 `runs/native-build-20261012-infra-retry/`、`runs/infra-20261012-dram-readiness/`。
-没有运行单元测试、数值检查、NUMA 分配、Faiss index 操作、8B 模型或 benchmark。
-这些 prepare 记录对应原 infra 配置；后续选型修订未执行修改后的代码/prepare，
-未构建 HAKES，也未运行并发、质量或性能验证。静态发现与接入步骤见 [plan §5](../plan.md#5-ivf-与相关系统的选型)。
+没有运行本仓库 adapter 的单元/数值检查、NUMA 分配、Faiss index 操作或 8B 模型。
+HAKES 的 SIFT1M CPU 独立探索已在之后单独执行；它不是项目 adapter、LLM KV
+workload、CXL 性能或论文复现。修改后的 prepare 尚未运行。接入步骤见 [plan §5](../plan.md#5-ivf-与相关系统的选型)。
 
 范围：native arena 还未经过运行时驻留/生命周期验证；Faiss 内部 FP32 K 副本的容量 reservation
 为预算估计，不是其实际 RSS；event journal 尚未接到模型持续 session。模型 KV 仍为 GPU

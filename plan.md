@@ -1,9 +1,9 @@
 # 多轮 IVF 与 NUMA 分层 KV 系统探索计划
 
-更新：2026-10-13。2026-10-09 的调研只进行了只读探测；2026-10-12 已落实技术选型和基础
-infra，安装 Faiss 控制依赖/pybind11、编译 native NUMA bridge、执行只读 prepare。
-随后按 owner 要求将 **HAKES-Index 提升为 CPU 并发 IVF 首选接入候选**，Faiss 只保留控制角色；
-已锁定/下载/静态核对 HAKES 源码，公共接口与配置不再绑定 Faiss。HAKES 尚未构建或接入。
+更新：2026-10-15。2026-10-12 已落实基础 infra；随后按 owner 要求将 **HAKES-Index 选为当前
+CPU IVF-PQ 实现方向**，Faiss 只保留串行控制角色。锁定源码已迁入 `third_party/hakes`，
+独立 SIFT1M CPU 检索和并发插入探索已执行；项目 native adapter 与模型 selector 尚未接入。
+探索结果与边界记录在本机忽略型 run artifact `runs/hakes-sift1m-cpu16-20261015T024344Z/RESULTS.md`。
 持续 session、IVF 实际操作、allocation/residency、数值、质量和性能仍待执行。
 主模型为本地 Llama-3.1-8B-Instruct，固定 canonical revision
 `0e9e39f249a16976918f6564b8830bc894c89659`。统一配置在
@@ -73,7 +73,7 @@ GPU 缓存有限 prefix/热 KV，GPU partial + CPU 选中历史 partial 合并�
 |---|---|---|---|
 | 模型/session/token | Python + 现有 Transformers/PyTorch adapter | 保留真实 Q/K/V、template 与位置控制，缩短首个正确原型路径 | 扩展 `src/module/` |
 | trace/配置/实验/质量 | Python + NumPy | 易审计、易复现；FP64 仅数学参考 | 扩展 artifacts 与 `scripts/` |
-| 主 IVF 候选 | HAKES-Index 的 C++17 filter library + pybind11，释放 GIL | 直接研究分区读写并发；外部 canonical K 精排，避免全量 refine copy | `src/index/`，native adapter 尚未写 |
+| 当前 IVF 源码 | HAKES-Index 的 C++17 filter library + 后续 pybind11 adapter，释放 GIL | 采用其分区读写并发；外部 canonical K 精排，避免全量 refine copy | `third_party/hakes/` 已 vendor；`src/index/` adapter 尚未写 |
 | index 控制 / 维护对照 | Faiss CPU 串行控制 / Quake 独立 C++ 环境 | exact/朴素 append 对照与 adaptive split/merge 分开比较 | `index/faiss.py` 与通用 interfaces/backends；Quake 未接入 |
 | KV arena/NUMA/leases | C++17 + pybind11 + libnuma | 显式 allocation、页驻留、owner、完成事件与并发边界 | 后续 `src/storage/` |
 | manifest/slots/log | C++17，先短锁和单 writer | 先获得安全发布与回收，避免无锁协议成为首轮依赖 | `src/index/` native 部分 |
@@ -176,7 +176,7 @@ CPU/GPU partial 的语义分区与物理 NUMA node 解耦。每 head 选集按 t
 
 | 对象 | 优先级/用途 | 接入边界 |
 |---|---|---|
-| HAKES-Index（PVLDB 2025） | **首选 CPU 并发 IVF 接入候选，进入 P2 首轮** | 只接 C++ filter library；分区共享/独占锁、PQ4 FastScan；精排读取我方 canonical K；不引入其 RPC/分布式 serving |
+| HAKES-Index（PVLDB 2025） | **当前选定的 CPU 并发 IVF 源码，进入 P2 首轮** | 只接 C++ filter library；分区共享/独占锁、PQ4 FastScan；精排读取我方 canonical K；不引入其 RPC/分布式 serving |
 | Faiss CPU FlatIP/IVF-Flat | exact 与串行控制，非目标并发后端 | IP、训练、add、scan；外部锁。当前 adapter 连 search/search 也串行；标准版本保存 FP32 vectors，并非 ID-only |
 | 自管 ID-only IVF | P2 后半至 P3 的受控实现 | 复用 coarse training/assignment，lists 只存稳定 ID；扫描 canonical K，单独测随机 gather |
 | Faiss IVF-SQ8/PQ | 压缩候选对照 | 编码/扫描产生候选，再 canonical K exact refine |
@@ -202,9 +202,16 @@ controller 管理：bounded exact tail、catch-up log、完整 manifest、读者
 
 ### 5.2 HAKES 接入顺序与已经发现的边界
 
+当前源码固定在 `third_party/hakes`，精确来源、revision 与归档 hash 见
+[`third_party/hakes/UPSTREAM.md`](third_party/hakes/UPSTREAM.md)。配置已把 HAKES 选为主 index，
+Faiss 仅为显式串行控制；HAKES 的独立 SIFT1M CPU build/search/mixed-insert 结果见上述 run report。
+这些结果证明该固定实现能在 CPU 上构建和执行标准 IVF-PQ 工作负载，但不代表项目
+`CandidateIndex` adapter、模型调用、KV 可见性协议、NUMA placement 或 CXL 路径已经完成。
+
 1. 固定 `9fbe8b99371c70d854618cff6de60e9986f4bd95`，源包 SHA-256 与用途写入
    [index_backends.json](configs/index_backends.json)。2026-10-12 的 `ls-remote` 与此一致。
-   原始源码放在忽略的 `artifacts/upstream/`；不覆盖当前 `.venv` 中的 Faiss wheel。
+   展开源码在 `third_party/hakes/`，原始源包保留于 `artifacts/upstream/hakes-9fbe8b9.tar.gz`；
+   不覆盖当前 `.venv` 中的 Faiss wheel。
 2. 只构建 `faiss-ex` 的 CPU C++ library，关闭 GPU、Python Faiss 包与上游 tests。
    再绑定独立命名的本项目 native module，长 train/add/search 释放 GIL；限制编译/运行线程。
    同进程动态符号和 BLAS/OpenMP 冲突需审计；不能仅给两个 `.so` 改名就宣称隔离。
@@ -400,13 +407,14 @@ ModelScope，记录 revision/hash；公开重打包须核对来源、许可与�
 
 - [x] P0-1 锁定 Faiss CPU/pybind11 与 native 构建配置，旧推理依赖不升级；记录本地 baseline checkout，未安装/复现上游。
 - [x] P0-4 基础统一配置、reservation、worker affinity、NUMA extent 源码/编译、独立 Faiss API、journal 与只读 prepare；运行时验收待执行。
-- [x] P0-5 修正 IVF 选型，HAKES 首选/Faiss 控制/Quake 维护/SIVF 参考；锁定与静态审计 HAKES，建立不依赖 Faiss 的接口、显式选型和依赖 inventory；native lock 与 Faiss control lock 分离。
+- [x] P0-5 修正 IVF 选型，HAKES 当前首选/Faiss 控制/Quake 维护/SIVF 参考；锁定源码迁入 `third_party/hakes`，建立不依赖 Faiss 的接口、显式选型和依赖 inventory；native lock 与 Faiss control lock 分离。
 - [ ] P0-2 与 owner 协调每个 job 的 CPU、各 node 内存、HBM、pinned memory 和运行窗口。
 - [ ] P0-3 向运维核对 node 2 缺席及 CXL 映射/counters；记录 configured={2,3}、observed={3}，实现前明确 residency 方法。
 - [ ] P1-1 扩展 generation/cache 为持续 session，保存 committed/pending token、template hash 与 position。
 - [ ] P1-2 定义 append/Q/lifecycle event trace，保留现有 Trace v1。
 - [ ] P1-3 后续验证短上下文 full session 与重算控制，保留所有失败。
-- [ ] P2-1 构建 HAKES CPU library 和独立 native adapter，落实上述源码修补、filter-only、GIL/并发/allocator 边界；先一个 layer/group。
+- [x] P2-0 独立构建固定 HAKES CPU library 并执行 SIFT1M 1M 向量 read-only / 90:10 mixed-insert 探索；配置、结果、临时 harness patch 和限制保存在独立 run 目录。
+- [ ] P2-1 在仓库内构建 HAKES CPU library 和独立 native adapter，落实上述源码修补、filter-only、GIL/并发/allocator 边界；先一个 layer/group。独立 SIFT1M run 不替代此项。
 - [ ] P2-2 完成 query prefix predicate、完整 delta/exact tail 与逐 head 去重、定期 flush；条目可见后才推进 delta，旧引用结束再回收；接通 FlatIP/IVF-Flat 控制。
 - [ ] P2-3 获得真实 8B 小批 Q/K trace，同质量/核数/预算比较 HAKES 与 Faiss；补并发/turn burst、更新可见延迟与峰值内存。
 - [ ] P2-4 接入 Quake 自适应维护对照；有界替换与长期 skew/drift workload 接入 P3，SIVF 维持后置 GPU 参考。

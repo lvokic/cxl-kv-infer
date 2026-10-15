@@ -14,7 +14,7 @@
 | Transformers / Hub | 4.57.6 / 0.36.2 |
 | tokenizers / safetensors | 0.22.2 / 0.8.0 |
 | CUDA compiler / JIT linker | nvcc 13.0.88 / nvjitlink 13.0.88 |
-| CPU ANN 控制 / native binding | Faiss CPU 1.15.1 / pybind11 3.1.0；HAKES 仅下载源码，未构建 |
+| CPU ANN 控制 / native binding | Faiss CPU 1.15.1 / pybind11 3.1.0；HAKES 固定源码在 `third_party/hakes`；独立 SIFT1M CPU 构建/运行已记录，项目 adapter 未构建 |
 | Native 构建 / NUMA | CMake 3.28.3、G++ 13.3.0、libnuma 2.0.18 |
 
 依赖和哈希分别保存在 `requirements/{core,gpu,inference}*.lock`；实际安装清单与原始安装
@@ -44,7 +44,7 @@ trace 包和 `cxl-kv-infer --help` 不导入 PyTorch / Transformers。CUDA 命�
 |---|---|---|
 | 模型 / session | Python、Transformers 4.57.6、PyTorch；`module/` | 旧单 request 入口保留；8B 尚未运行，persistent session 为 P1 |
 | 配置 / artifacts / journal | Python/NumPy；`infra/` + 现有 artifacts | 统一配置与只读 prepare 已执行；增量 journal 源码未跑 |
-| 主 index 候选 | HAKES-Index C++17 filter library、独立 pybind11 adapter | 锁定源码并静态核对；未构建、未实现 adapter、未运行；不导入标准 Faiss 代替 |
+| 主 index | HAKES-Index C++17 IVF-PQ FastScan filter library、独立 pybind11 adapter | 固定源码已 vendor；独立 SIFT1M CPU 探索已运行；项目 adapter/模型调用仍未实现，不导入标准 Faiss 代替 |
 | index 接口 / 控制 | `index/interfaces.py`、显式 `backends.py`；Faiss CPU 控制 | FlatIP / IVF-Flat API 已写、控制依赖已安装；未运行 train/add/search |
 | 稳定 host extent | C++17、pybind11、libnuma；`storage/` | 编译成功；尚未执行驻留或 owner/view 生命周期验证 |
 | attention | SDPA dense 控制；FlashInfer selected attention | 沿用后端；新 8B 的数值/质量检查未进行 |
@@ -53,7 +53,7 @@ trace 包和 `cxl-kv-infer --help` 不导入 PyTorch / Transformers。CUDA 命�
 | 强基线 | RetroInfer 系统对照、Quake 维护对照、SIVF GPU 更新参考 | 各自固定 checkout/环境；不把 Quake 动态维护称为现成读写并发 |
 | benchmark | 首选 RULER；后续 LoCoMo/LongMemEval | 当前 RULER 是 NeMo-Skills 入口源码，无生成数据；生成器环境分离 |
 
-**HAKES 优先接入 CPU 并发 IVF；Faiss 仅为 exact/串行控制，Quake 为动态维护对照。**
+**当前选用 HAKES 作为 CPU 并发 IVF 源码；Faiss 仅为 exact/串行控制，Quake 为动态维护对照。**
 这不表示已找到本机 attention workload 的性能最优解。HAKES 论文直接评估了并发读写，
 Quake 论文 §8.2 的实现仍串行处理 search/update/maintenance；SIVF 处理 GPU 流式变更。
 比较须对齐最终 selection 质量、因果 stream、query P99、更新可见延迟、线程和内存预算。
@@ -98,9 +98,10 @@ uv pip install --python .venv/bin/python --no-deps --no-build-isolation -e .
 uv pip install --python .venv/bin/python --require-hashes -r requirements/ann.lock
 ```
 
-HAKES 是源码构建候选，不包含在这两个 Python lock 中。其原始源包已经下载到
-`artifacts/upstream/hakes-9fbe8b9.tar.gz`；revision/hash 见 `configs/index_backends.json`。
-未构建 native library，未生成训练参数、未启动服务或 index 操作。
+HAKES 是独立源码构建项，不包含在这两个 Python lock 中。固定源码位于 `third_party/hakes`，
+原始源包仍保留在 `artifacts/upstream/hakes-9fbe8b9.tar.gz`；revision/hash 见
+`configs/index_backends.json` 和 `third_party/hakes/UPSTREAM.md`。独立 SIFT1M CPU run 已生成训练参数、
+构建索引并执行检索/并发插入；这不代表项目 native adapter、模型 runner 或 serving 已接通。
 
 目录增加实际组件：`src/infra/` 为配置、拓扑、reservation、journal 和实验入口；
 `src/index/` 为通用 identity/candidate 协议、显式 backend 选择/inventory 与 Faiss 控制；
@@ -124,8 +125,9 @@ Faiss 与 native bridge 分别在实际使用时才导入。
   上限已登记，实际池、回压与 replacement 控制仍属 P1–P3。
 - HBM 计划上限 32GiB；PyTorch fraction=0.75，在 40GiB 卡上约 30GiB，另预留至少 1GiB。
   这不是驱动/FlashInfer 等所有 GPU allocation 的通用硬上限。
-- 主 index 配置是 `hakes/ivf_pq_fastscan`，control 是 `faiss_cpu/ivf_flat`，以 IP/d=128、
-  PQ4/M=32、无降维起步；候选倍数与质量需后续选取。这是选型配置，不表示 HAKES adapter 已实现。
+- 当前主 index 配置是 `hakes/ivf_pq_fastscan`，control 是 `faiss_cpu/ivf_flat`，以 IP/d=128、
+  PQ4/M=32、无降维起步。SIFT1M 探索的 OPQ64/L2 参数属于独立 ANN benchmark，不是该 KV 配置的验证。
+  项目 adapter 仍未实现，配置选中 HAKES 不等于 runner 已调用它。
 
 只读准备，自动生成唯一新 run，不加载模型、不操作 index、不分配 arena：
 
@@ -143,7 +145,7 @@ baseline commits、benchmark 状态、依赖/native binary。核对模型当前�
 17GB 权重哈希使用既有完成记录，不在每次预检重算。
 
 `index-backends.json` 与 readiness 分别报告 selected/control 的 `adapter_written`、
-optional dependencies 和上游源包 hash。所选 HAKES 当前 `adapter_written=false`；
+optional dependencies、上游源包 hash 和 vendored source presence。所选 HAKES 当前 `adapter_written=false`；
 prepare 可以记录这一未完成状态，`prepared` 不表示 index 可运行。Faiss 不是基础预检的强制依赖。
 构造目标后端会明确拒绝尚未接入的 HAKES；只有 `create_index(..., control=True)` 才显式
 构造 Faiss control，不会自动降级。dense/full 模型控制还没有使用任何 IVF adapter。
@@ -196,10 +198,13 @@ capture 磁盘 I/O 必须单列，不能作为 index 性能结果。
 首次编译失败在 `runs/native-build-20261012-infra/`，修复后构建在
 `runs/native-build-20261012-infra-retry/`，预检在 `runs/infra-20261012-dram-readiness/`。
 没有运行新 API 的单元、数值、驻留、生命周期、质量或性能测试，也没有运行 8B 模型。
-随后的 IVF 选型修订仅下载/核对上游源码、修改代码/配置/文档和重新解析两个 lock；
-没有执行修改后的 adapter/config/prepare，没有编译 HAKES 或运行任何测试/benchmark。
+随后完成 HAKES 固定源码迁入 `third_party/hakes`，并独立执行了 SIFT1M 1M 向量 CPU ANN 探索：
+16 个 CPU worker、GCC 11.4、oneMKL 2024.0，Recall@10 为 0.99304，读写混合 workload 最终
+base/refine/mapping 数量一致。该 run 的详细数值、配置、临时 harness patch 和限制见
+`runs/hakes-sift1m-cpu16-20261015T024344Z/RESULTS.md`。没有执行本项目 HAKES adapter/config/prepare，
+没有测 KV attention quality、CXL 或 HAKES 接入模型后的性能。
 
-后续获得实施验证授权时的验收条件，本轮未执行：
+后续接入 adapter 时的验收条件，本轮迁移未执行：
 
 1. budget 超限、失败回滚和 owner/views 生命周期；所有存活副本/缓冲仍计费。
 2. node 缺席/权限失败/驻留不符必须拒绝，DRAM/CXL 分开记录实际页驻留。

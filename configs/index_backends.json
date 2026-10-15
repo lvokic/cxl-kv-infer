@@ -10,12 +10,13 @@
     "maintenance_evidence": "Retrain into a new owner; lifecycle replacement belongs to this project."
   },
   "hakes": {
-    "role": "primary_cpu_concurrent_ivf_candidate",
+    "role": "selected_cpu_concurrent_ivf_source",
     "kinds": ["ivf_pq_fastscan"],
     "metrics": ["inner_product"],
     "dependencies": {},
     "repository": "https://github.com/nusdbsystem/HAKES-Search",
     "revision": "9fbe8b99371c70d854618cff6de60e9986f4bd95",
+    "vendored_source": "third_party/hakes",
     "reference": "https://www.vldb.org/pvldb/vol18/p3049-ooi.pdf",
     "source_archive": "artifacts/upstream/hakes-9fbe8b9.tar.gz",
     "source_archive_sha256": "8de74f1e40db97ed89b78604d26ceb8f7924eee2e19187fc2540849fc93a7414",
