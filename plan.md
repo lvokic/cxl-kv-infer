@@ -1,7 +1,7 @@
 # 多轮 IVF 与 NUMA 分层 KV 系统探索计划
 
 更新：2026-10-15。2026-10-12 已落实基础 infra；随后按 owner 要求将 **HAKES-Index 选为当前
-CPU IVF-PQ 实现方向**，Faiss 只保留串行控制角色。锁定源码已迁入 `third_party/hakes`，
+CPU IVF-PQ 实现方向**，Faiss 只保留串行控制角色。锁定 submodule 位于 `third_party/hakes`，
 独立 SIFT1M CPU 检索和并发插入探索已执行；项目 native adapter 与模型 selector 尚未接入。
 探索结果与边界记录在本机忽略型 run artifact `runs/hakes-sift1m-cpu16-20261015T024344Z/RESULTS.md`。
 持续 session、IVF 实际操作、allocation/residency、数值、质量和性能仍待执行。
@@ -73,7 +73,7 @@ GPU 缓存有限 prefix/热 KV，GPU partial + CPU 选中历史 partial 合并�
 |---|---|---|---|
 | 模型/session/token | Python + 现有 Transformers/PyTorch adapter | 保留真实 Q/K/V、template 与位置控制，缩短首个正确原型路径 | 扩展 `src/module/` |
 | trace/配置/实验/质量 | Python + NumPy | 易审计、易复现；FP64 仅数学参考 | 扩展 artifacts 与 `scripts/` |
-| 当前 IVF 源码 | HAKES-Index 的 C++17 filter library + 后续 pybind11 adapter，释放 GIL | 采用其分区读写并发；外部 canonical K 精排，避免全量 refine copy | `third_party/hakes/` 已 vendor；`src/index/` adapter 尚未写 |
+| 当前 IVF 源码 | HAKES-Index 的 C++17 filter library + 后续 pybind11 adapter，释放 GIL | 采用其分区读写并发；外部 canonical K 精排，避免全量 refine copy | `third_party/hakes/` 为固定 submodule；`src/index/` adapter 尚未写 |
 | index 控制 / 维护对照 | Faiss CPU 串行控制 / Quake 独立 C++ 环境 | exact/朴素 append 对照与 adaptive split/merge 分开比较 | `index/faiss.py` 与通用 interfaces/backends；Quake 未接入 |
 | KV arena/NUMA/leases | C++17 + pybind11 + libnuma | 显式 allocation、页驻留、owner、完成事件与并发边界 | 后续 `src/storage/` |
 | manifest/slots/log | C++17，先短锁和单 writer | 先获得安全发布与回收，避免无锁协议成为首轮依赖 | `src/index/` native 部分 |
@@ -202,8 +202,8 @@ controller 管理：bounded exact tail、catch-up log、完整 manifest、读者
 
 ### 5.2 HAKES 接入顺序与已经发现的边界
 
-当前源码固定在 `third_party/hakes`，精确来源、revision 与归档 hash 见
-[`third_party/hakes/UPSTREAM.md`](third_party/hakes/UPSTREAM.md)。配置已把 HAKES 选为主 index，
+当前源码固定为 `third_party/hakes` submodule，精确来源、revision 与归档 hash 见
+[`third_party/HAKES.md`](third_party/HAKES.md)。配置已把 HAKES 选为主 index，
 Faiss 仅为显式串行控制；HAKES 的独立 SIFT1M CPU build/search/mixed-insert 结果见上述 run report。
 这些结果证明该固定实现能在 CPU 上构建和执行标准 IVF-PQ 工作负载，但不代表项目
 `CandidateIndex` adapter、模型调用、KV 可见性协议、NUMA placement 或 CXL 路径已经完成。
@@ -407,7 +407,7 @@ ModelScope，记录 revision/hash；公开重打包须核对来源、许可与�
 
 - [x] P0-1 锁定 Faiss CPU/pybind11 与 native 构建配置，旧推理依赖不升级；记录本地 baseline checkout，未安装/复现上游。
 - [x] P0-4 基础统一配置、reservation、worker affinity、NUMA extent 源码/编译、独立 Faiss API、journal 与只读 prepare；运行时验收待执行。
-- [x] P0-5 修正 IVF 选型，HAKES 当前首选/Faiss 控制/Quake 维护/SIVF 参考；锁定源码迁入 `third_party/hakes`，建立不依赖 Faiss 的接口、显式选型和依赖 inventory；native lock 与 Faiss control lock 分离。
+- [x] P0-5 修正 IVF 选型，HAKES 当前首选/Faiss 控制/Quake 维护/SIVF 参考；以固定 submodule 引入 `third_party/hakes`，建立不依赖 Faiss 的接口、显式选型和依赖 inventory；native lock 与 Faiss control lock 分离。
 - [ ] P0-2 与 owner 协调每个 job 的 CPU、各 node 内存、HBM、pinned memory 和运行窗口。
 - [ ] P0-3 向运维核对 node 2 缺席及 CXL 映射/counters；记录 configured={2,3}、observed={3}，实现前明确 residency 方法。
 - [ ] P1-1 扩展 generation/cache 为持续 session，保存 committed/pending token、template hash 与 position。

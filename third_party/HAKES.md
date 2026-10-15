@@ -9,7 +9,7 @@ The outer repository records HAKES as a Git submodule at `third_party/hakes`; it
 track the upstream source files directly. Initialize it with:
 
 ```bash
-git submodule update --init --recursive third_party/hakes
+git submodule update --init third_party/hakes
 ```
 
 This is the selected CPU IVF-PQ FastScan implementation for the current indexing direction.

@@ -14,7 +14,7 @@
 | Transformers / Hub | 4.57.6 / 0.36.2 |
 | tokenizers / safetensors | 0.22.2 / 0.8.0 |
 | CUDA compiler / JIT linker | nvcc 13.0.88 / nvjitlink 13.0.88 |
-| CPU ANN 控制 / native binding | Faiss CPU 1.15.1 / pybind11 3.1.0；HAKES 固定源码在 `third_party/hakes`；独立 SIFT1M CPU 构建/运行已记录，项目 adapter 未构建 |
+| CPU ANN 控制 / native binding | Faiss CPU 1.15.1 / pybind11 3.1.0；HAKES 固定 submodule 在 `third_party/hakes`；独立 SIFT1M CPU 构建/运行已记录，项目 adapter 未构建 |
 | Native 构建 / NUMA | CMake 3.28.3、G++ 13.3.0、libnuma 2.0.18 |
 
 依赖和哈希分别保存在 `requirements/{core,gpu,inference}*.lock`；实际安装清单与原始安装
@@ -44,7 +44,7 @@ trace 包和 `cxl-kv-infer --help` 不导入 PyTorch / Transformers。CUDA 命�
 |---|---|---|
 | 模型 / session | Python、Transformers 4.57.6、PyTorch；`module/` | 旧单 request 入口保留；8B 尚未运行，persistent session 为 P1 |
 | 配置 / artifacts / journal | Python/NumPy；`infra/` + 现有 artifacts | 统一配置与只读 prepare 已执行；增量 journal 源码未跑 |
-| 主 index | HAKES-Index C++17 IVF-PQ FastScan filter library、独立 pybind11 adapter | 固定源码已 vendor；独立 SIFT1M CPU 探索已运行；项目 adapter/模型调用仍未实现，不导入标准 Faiss 代替 |
+| 主 index | HAKES-Index C++17 IVF-PQ FastScan filter library、独立 pybind11 adapter | 固定 submodule 已配置；独立 SIFT1M CPU 探索已运行；项目 adapter/模型调用仍未实现，不导入标准 Faiss 代替 |
 | index 接口 / 控制 | `index/interfaces.py`、显式 `backends.py`；Faiss CPU 控制 | FlatIP / IVF-Flat API 已写、控制依赖已安装；未运行 train/add/search |
 | 稳定 host extent | C++17、pybind11、libnuma；`storage/` | 编译成功；尚未执行驻留或 owner/view 生命周期验证 |
 | attention | SDPA dense 控制；FlashInfer selected attention | 沿用后端；新 8B 的数值/质量检查未进行 |
@@ -98,9 +98,9 @@ uv pip install --python .venv/bin/python --no-deps --no-build-isolation -e .
 uv pip install --python .venv/bin/python --require-hashes -r requirements/ann.lock
 ```
 
-HAKES 是独立源码构建项，不包含在这两个 Python lock 中。固定源码位于 `third_party/hakes`，
+HAKES 是独立源码构建项，不包含在这两个 Python lock 中。固定 submodule 位于 `third_party/hakes`，
 原始源包仍保留在 `artifacts/upstream/hakes-9fbe8b9.tar.gz`；revision/hash 见
-`configs/index_backends.json` 和 `third_party/hakes/UPSTREAM.md`。独立 SIFT1M CPU run 已生成训练参数、
+`configs/index_backends.json` 和 `third_party/HAKES.md`。独立 SIFT1M CPU run 已生成训练参数、
 构建索引并执行检索/并发插入；这不代表项目 native adapter、模型 runner 或 serving 已接通。
 
 目录增加实际组件：`src/infra/` 为配置、拓扑、reservation、journal 和实验入口；
@@ -145,7 +145,7 @@ baseline commits、benchmark 状态、依赖/native binary。核对模型当前�
 17GB 权重哈希使用既有完成记录，不在每次预检重算。
 
 `index-backends.json` 与 readiness 分别报告 selected/control 的 `adapter_written`、
-optional dependencies、上游源包 hash 和 vendored source presence。所选 HAKES 当前 `adapter_written=false`；
+optional dependencies、上游源包 hash 和 submodule initialization state。所选 HAKES 当前 `adapter_written=false`；
 prepare 可以记录这一未完成状态，`prepared` 不表示 index 可运行。Faiss 不是基础预检的强制依赖。
 构造目标后端会明确拒绝尚未接入的 HAKES；只有 `create_index(..., control=True)` 才显式
 构造 Faiss control，不会自动降级。dense/full 模型控制还没有使用任何 IVF adapter。

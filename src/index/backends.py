@@ -47,16 +47,19 @@ def backend_inventory(name):
             observed = checksum.hexdigest()
         archive = {'path': str(path), 'exists': path.is_file(), 'sha256': observed,
                    'matches': observed == spec['source_archive_sha256']}
-    source_tree = None
-    if 'vendored_source' in spec:
-        path = ROOT / spec['vendored_source']
-        marker = path / 'UPSTREAM.md'
-        source_tree = {'path': str(path), 'exists': path.is_dir(),
-                       'provenance_marker': marker.is_file()}
+    source_submodule = None
+    if 'source_submodule' in spec:
+        path = ROOT / spec['source_submodule']
+        metadata = ROOT / spec['source_metadata']
+        source_submodule = {'path': str(path), 'exists': path.is_dir(),
+                            'initialized': (path / '.git').exists(),
+                            'provenance_metadata': str(metadata),
+                            'provenance_exists': metadata.is_file()}
     written = name in ADAPTERS
     return {'backend': name, 'spec': spec, 'adapter_written': written,
             'adapter_dependencies_present': written and all(x['matches'] for x in dependencies.values()),
-            'dependencies': dependencies, 'source_archive': archive, 'source_tree': source_tree,
+            'dependencies': dependencies, 'source_archive': archive,
+            'source_submodule': source_submodule,
             'scope': 'metadata/source inventory only; adapter import, train, append and search not attempted'}
 
 

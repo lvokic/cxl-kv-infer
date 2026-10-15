@@ -6,13 +6,13 @@
 
 ## 交付状态
 
-2026-10-15：技术选型、基础 infra 与 HAKES 源码归档已更新，见 [开发与运行](docs/DEVELOPMENT.md)。
+2026-10-15：技术选型、基础 infra 与 HAKES submodule 已更新，见 [开发与运行](docs/DEVELOPMENT.md)。
 本地 Llama-3.1-8B-Instruct 为主模型；安装了锁定 Faiss CPU/pybind11，编译了 C++17/libnuma
 arena 桥接层，执行了不加载模型的只读预检。新增统一配置、资源 reservation、逐 worker affinity、
 独立 FlatIP/IVF-Flat API 与增量 event journal。尚未执行这些新接口的数值、驻留或性能验证。
 
 IVF 选型已按并发更新需求调整：**当前优先采用 HAKES-Index 作为 CPU IVF-PQ 源码，Faiss
-保留为串行控制，Quake 为动态维护对照**。HAKES 固定版本已放入 `third_party/hakes`；独立
+保留为串行控制，Quake 为动态维护对照**。HAKES 固定版本通过 submodule `third_party/hakes` 引入；独立
 SIFT1M CPU 探索已构建并运行；本机的忽略型 run 记录位于 `runs/hakes-sift1m-cpu16-20261015T024344Z/RESULTS.md`。
 项目自己的 HAKES adapter 和模型索引调用仍未接通，因此运行时不会假装已使用 HAKES，也不会自动
 降级到 Faiss。具体接入边界见 [plan §5](plan.md#5-ivf-与相关系统的选型)。

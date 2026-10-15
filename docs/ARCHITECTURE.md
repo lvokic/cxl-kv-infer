@@ -1,6 +1,6 @@
 # 系统架构与数据契约
 
-更新：2026-10-15。主线是多轮 session 的动态 IVF、partial attention 和有界内存管理；单节点 PCIe A100、CPU DRAM、memory-only CXL。研究动机和实验设计见 [PROPOSAL.md](PROPOSAL.md)，版本协议详见 [INDEX_LIFECYCLE.md](INDEX_LIFECYCLE.md)。HAKES 源码已 vendor；独立 SIFT1M CPU run 已完成，项目 adapter 仍待接入。
+更新：2026-10-15。主线是多轮 session 的动态 IVF、partial attention 和有界内存管理；单节点 PCIe A100、CPU DRAM、memory-only CXL。研究动机和实验设计见 [PROPOSAL.md](PROPOSAL.md)，版本协议详见 [INDEX_LIFECYCLE.md](INDEX_LIFECYCLE.md)。HAKES 已作为固定 submodule 接入；独立 SIFT1M CPU run 已完成，项目 adapter 仍待接入。
 
 **时序与主执行路径：** 本轮从已有大量历史（例如 100K）和活动 IVF 开始，轮内维护 delta 并定期插入活动索引，参数保持不变。全量重建只在下一轮 prefill 开始时启动，利用已保留历史 K 与新 suffix 产生的 K；初版在进入 decode 前完成追赶与发布。GPU 缓存有限热 KV（可含保留 prefix），GPU partial 与 CPU 历史 partial 合并输出。这是目标设计，尚未接入当前模型 runner。
 
@@ -19,7 +19,7 @@ partial 归并与记录的状态，后续模型层消费 normalized output。
 |---|---|---|
 | `infra/` 与 `configs/experiment.json` | 配置、预算 reservation、单 worker affinity、journal、只读 prepare 已提供；prepare 已运行 | 真实阶段计量、资源协调与自动 admission |
 | `storage/arena.py` / `numa.cpp` | 严格 NUMA extent 源码已编译；没有执行 allocation/residency 验证 | 稳定 token 目录、模型 offload、GPU/DMA 完成事件和池化回收 |
-| `index/interfaces.py` / `backends.py` / `faiss.py` | 通用候选协议与显式 backend/inventory；串行 Faiss 控制 API；HAKES 源码位于 `third_party/hakes`，独立 SIFT1M CPU 探索已运行；项目 adapter 未写、模型 runner 未调用 | HAKES 并发 filter、exact tail、模型 selector、Quake 维护对照与 bounded replacement |
+| `index/interfaces.py` / `backends.py` / `faiss.py` | 通用候选协议与显式 backend/inventory；串行 Faiss 控制 API；HAKES 固定 submodule 位于 `third_party/hakes`，独立 SIFT1M CPU 探索已运行；项目 adapter 未写、模型 runner 未调用 | HAKES 并发 filter、exact tail、模型 selector、Quake 维护对照与 bounded replacement |
 | `module/interfaces.py` 的 ModelAdapter / TokenSelector / AttentionExecutor | 模型、选择、执行接口已分离 | session、索引版本和跨设备工作描述 |
 | `module/generation.py` / `model.py` | 每次 generate 新建 DynamicCache，finally end_request；Llama-family、位置限制和 RoPE 范围明确 | 持续多轮、增量 prefill、最后一个 token 的缓存提交 |
 | `module/cache.py` | 观察 append，借用模型拥有的 tensor；token_ids=None；不是稳定 native backing | 稳定 ID、K/V 目录、实际 placement 和异步租约 |

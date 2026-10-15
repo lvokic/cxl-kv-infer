@@ -8,7 +8,7 @@ GPU prefix/热 KV partial + CPU 历史 partial，经 LSE 合并。介绍页仍�
 为主体大图；实现依据同步至 [architecture](ARCHITECTURE.md)、[lifecycle](INDEX_LIFECYCLE.md)、
 [proposal](PROPOSAL.md) 和 [plan](../plan.md)。现有 runner 尚未实现这些新路径。
 
-2026-10-15：HAKES-Search 固定源码已迁入 `third_party/hakes`，配置将它作为当前优先 CPU
+2026-10-15：HAKES-Search 已作为固定 submodule 接入 `third_party/hakes`，配置将它作为当前优先 CPU
 IVF-PQ 源码；独立 SIFT1M CPU build/search/mixed-insert 结果见
 `runs/hakes-sift1m-cpu16-20261015T024344Z/RESULTS.md`。这项实验不是项目 adapter 或模型路径；
 运行时接入仍是 P2 工作。
@@ -20,8 +20,8 @@ IVF-PQ 源码；独立 SIFT1M CPU build/search/mixed-insert 结果见
 没有新增空目录、`__init__.py` 或 `__main__.py`。
 
 随后根据 owner 对并发 IVF 的要求更正选型：HAKES-Index 是当前优先 CPU IVF-PQ 实现，Faiss
-只保留 exact/串行控制，Quake 用于动态维护对照。锁定 HAKES 源码已迁入 `third_party/hakes`，
-来源和 revision 见其中的 `UPSTREAM.md`；新增通用 `index/interfaces.py`、显式 `backends.py`
+只保留 exact/串行控制，Quake 用于动态维护对照。锁定 HAKES submodule 位于 `third_party/hakes`，
+来源和 revision 见 `third_party/HAKES.md`；新增通用 `index/interfaces.py`、显式 `backends.py`
 和 `configs/index_backends.json`，线程参数为 `index_threads`，native/control 依赖锁分离。
 HAKES 独立 SIFT1M CPU 构建与探索运行的本机 run report 位于 `runs/hakes-sift1m-cpu16-20261015T024344Z/RESULTS.md`。
 项目 HAKES adapter 尚未实现，模型 runner 还不能调用它；所选后端不会自动降级为 Faiss。
